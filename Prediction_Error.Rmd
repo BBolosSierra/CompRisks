@@ -1,0 +1,912 @@
+---
+title: "Prediction Error Brier Scores"
+output: html_document
+date: "2024-10-19"
+---
+
+
+# Metrics for survival analysis. 
+
+The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. 
+
+
+```{r}
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(ggplot2)
+library(geepack)
+library(dplyr)
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+
+
+```{r}
+# Import data ------------------
+rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
+vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+```
+
+```{r}
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+```{r}
+source("CompRisksMetrics/HelperFunctions.R")
+```
+
+Each model will have a different summary and it is relevant to identify key elements that are needed to calculate the metrics. 
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+## Prediction Error
+
+### Brier Score and Weighted Brier Score
+
+How close are estimated risks to the observed primary event indicators? Brier score is the average squared difference between estimated risks and primary event indicators. 
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^{N}(\hat{y}_{i}(\tau)-y_{i}({\tau}))^2$$
+
+$\hat{y}$ or f(\tau) is the predicted probability of the event at time for individual i and y is the event outcome is the actual event outcome (1 if the event occurred, 0 if it did not).
+
+The weighted Brier score includes one more parameter to account for censoring:
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^{N}w_{i}(\tau)(\hat{y}_{i}({\tau}) - y_{i}(\tau))^2$$
+
+wi(\tau) is the inverse probability of censoring weights (IPCW), used to adjust for censored individuals. The IPCW method assigns a weight to each individual based on the probability that they were not censored by time \tau.
+
+As done in the paper dependent on Score function from riskRegression seems to only calculate the non-weighted Brier Score and the Scaled Brier Score (IPA) as outputs of the riskRegression::Score. Where \tau is "horizon".
+
+```{r}
+# Models -------------------
+fit_csh <- riskRegression::CSC(Hist(time, status_num) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+fit_csc1 <- fit_csh$models$`Cause 1`
+fit_csc2 <- fit_csh$models$`Cause 2`
+
+# Overall performance measures ----------------
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Development data
+score_rdata <- riskRegression::Score(
+  list("csh_development" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = rdata,
+  conf.int = TRUE,
+  times = horizon,
+  metrics = c("auc", "brier"),
+  summary = c("ipa"),
+  cause = primary_event,
+  plots = "calibration"
+)
+
+# Validation data
+score_vdata <- Score(
+  list("csh_validation" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = horizon,
+  metrics = c("auc", "brier"),
+  summary = c("ipa"),
+  cause = primary_event,
+  plots = "calibration"
+)
+# Score functions in any bootstrap data
+score_boot <- function(split) {
+  Score(
+    list("csh_validation" = fit_csh),
+    formula = Hist(time, status_num) ~ 1,
+    cens.model = "km",
+    data = analysis(split),
+    conf.int = TRUE,
+    times = horizon,
+    metrics = c("auc", "brier"),
+    summary = c("ipa"),
+    cause = primary_event,
+    plots = "calibration"
+  )
+}
+
+score_vdata$Brier$score
+```
+
+
+To calculate the CI of the scaled Brier:
+
+```{r eval=FALSE, include=TRUE}
+# Load rsample library
+library(rsample)
+library(purrr)
+
+# Assume 'development_data' is your original dataset
+# Generate bootstrap resamples of the development data
+rboot <- bootstraps(rdata, times = 1000)  # Example with 1000 resamples
+
+vboot <- bootstraps(vdata, times = 1000)
+
+# Development data
+rboot <- rboot |> mutate(
+  score = purrr::map(splits, score_boot),
+  scaled_brier = map_dbl(score, function(x) {
+    x$Brier$score[model == "csh_validation"]$IPA
+  })
+)
+# Validation data
+vboot <- vboot |> mutate(
+  score = purrr::map(splits, score_boot),
+  scaled_brier = map_dbl(score, function(x) {
+    x$Brier$score[model == "csh_validation"]$IPA
+  })
+)
+```
+
+
+```{r}
+#mean(vboot$scaled_brier)
+```
+
+
+Sine we want to move from the Score function in RiskRegression, we can have our own definition of Brier Score:
+
+```{r}
+# Easy brier 
+BrierScore <- function(predictions,
+                        time, 
+                        status, 
+                        tau, 
+                        cause){ 
+  
+  y_true = ((time <= tau) * (status == cause))
+  
+  BS = mean((predictions-y_true)^2)
+  
+  return(BS)
+  
+}
+```
+
+```{r}
+
+# Predicted probability calculation
+pred <- predictRisk(fit_csh,
+  cause = primary_event,
+  newdata = vdata,
+  times = horizon
+)
+BrierScore(predictions=pred, 
+            time = vdata$time, 
+            status = vdata$status,
+            cause = primary_event,
+            tau = horizon)
+```
+
+We obtain the same value as from the riskRegression::Score
+
+(Next add CI)
+
+##### Weighted Brier Score - IPCW
+
+https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/s12874-022-01679-6
+
+To account for the loss of information due to censoring, we reweight the individual contributions using the Kaplan-Meier estimator of the survival function of the censoring time.
+
+The idea is to give less weight to individuals who are censored earlier, as they provide less complete information about the event of interest. Those who are not censored (or censored late) are given higher weights.
+
+
+$\hat G (\tau)$ is the censoring probability. It can be calculated with the Kaplan-Meier survival probability of being uncensored at time \tau. 
+
+If an individual is censored before t, the weight of that individual at time t is set to a small value or zero to indicate they provide less information.
+
+The censoring probability can then be used to calculate the IPCW, used in the weighted Brier Score:
+
+
+The weighted Brier Score (BS) formula for right-censored data, adjusting for censoring using Inverse Probability of Censoring Weights (IPCW), is given by:
+
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^N \left( 
+\frac{(0 - \hat{S}(\tau, \mathbf{x}_i))^2 \cdot \mathbb{I}(T_i \leq \tau, \delta_i = 1)}{\hat{G}(T_i^-)} 
++ 
+\frac{(1 - \hat{S}(\tau, \mathbf{x}_i))^2 \cdot \mathbb{I}(T_i > \tau)}{\hat{G}(\tau)} 
+\right)$$
+
+
+$BS(\tau)$: The Brier Score at time $\tau$.
+$\hat{S}(\tau, \mathbf{x}_i)$: The predicted survival probability for individual $i$ at time $\tau$, based on their covariates $\mathbf{x}_i$.
+$\hat{G}(\tau)$: The Kaplan-Meier estimator of the censoring survival probability at time $\tau$ (probability of remaining uncensored up to $\tau$).
+$\hat{G}(T_i^-)$: The Kaplan-Meier censoring probability just before $T_i$ (used for individuals who have experienced the event).
+$\mathbb{I}(T_i \leq \tau, \delta_i = 1)$: Indicator function, which equals:
+$1$, if $T_i \leq \tau$ (event occurred before or at $\tau$) and $\delta_i = 1$ (event of interest), $0$, otherwise.
+
+$\mathbb{I}(T_i > \tau)$: Indicator function, which equals:
+$1$, if $T_i > \tau$ (the individual is still at risk at $\tau$),$0$, otherwise.
+
+$N$: Total number of individuals in the dataset.
+
+
+1. First Term: Events Occurred by $\tau$
+
+$$
+\frac{(0 - \hat{S}(\tau, \mathbf{x}_i))^2 \cdot \mathbb{I}(T_i \leq \tau, \delta_i = 1)}{\hat{G}(T_i^-)}
+$$
+
+This term handles individuals who have experienced the **event of interest** by time $\tau$ (i.e., $T_i \leq \tau$ and $\delta_i = 1$). Because it handles individuals that experience the event, the true survival is 0: $(0 - \hat{S}(\tau, \mathbf{x}_i))^2$. 
+
+The squared error $(0 - \hat{S}(\tau, \mathbf{x}_i))^2$ penalizes the predicted survival probability $\hat{S}(\tau, \mathbf{x}_i)$ if the model overestimates survival (i.e., predicts a high survival probability for an individual whose event already occurred).
+
+The censoring weight $\frac{1}{\hat{G}(T_i^-)}$ accounts for the fact that censored individuals cannot contribute to this term.
+
+
+2. Second Term: Individuals Still at Risk at $\tau$
+
+$$
+\frac{(1 - \hat{S}(\tau, \mathbf{x}_i))^2 \cdot \mathbb{I}(T_i > \tau)}{\hat{G}(\tau)}
+$$
+
+This term handles individuals who are still at risk at time $\tau$ (i.e., $T_i > \tau$).Because it handles individuals still at risk, if the individual is still alive or event-free at time \tau the true survival is 1: $(1 - \hat{S}(\tau, \mathbf{x}_i))^2$. 
+
+The squared error $(1 - \hat{S}(\tau, \mathbf{x}_i))^2$ penalizes the predicted survival probability $\hat{S}(\tau, \mathbf{x}_i)$ if the model underestimates survival (i.e., predicts a low survival probability for an individual who has not yet experienced the event).
+
+The censoring weight $\frac{1}{\hat{G}(\tau)}$ adjusts for the fact that censored individuals contribute less information.
+
+
+In another way, the IPCW weights per each individual are: 
+
+$$
+ W_{i} = \frac{\mathbb{I}(T_i \leq \tau, \delta_i = 1)}{\hat{G}(T_i^-)} + \frac{\mathbb{I}(T_i > \tau)}{\hat{G}(\tau)}
+$$
+and therefore the Weighted brier score can be written as:
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^{N}W_{i}(\tau)(D_{i}(\tau)-f_{i}(\tau))^2$$
+where D is an indicator function $D_{i}(\tau) = \mathbb{I}(T_{i}>\tau)$. 1 when true survival T>\tau, the individual is still at risk and therefore it is surviving (we do not care just yet if the individual would experience the event or not). Once the event of interest occurs T<= \tau and delta = 1, the individual is no longer "surviving" and the true value is 0 (if delta would be 0, means censored and it would not contribute). 
+
+More formally:
+$D_i(\tau)$ determines the **true survival status** of the individual at time $\tau$:
+     \[
+     D_i(\tau) =
+     \begin{cases}
+       0, & \text{if } T_i \leq \tau \text{ and } \delta_i = 1 \text{ (event occurred by } \tau \text{)}, \\
+       1, & \text{if } T_i > \tau \text{ (individual is still at risk)}.
+     \end{cases}
+     \]
+     
+The error term $(D_i(\tau) - f_i(\tau))^2$ in the reduced formula directly corresponds to the two terms in the original formula:
+$(0 - \hat{S}(\tau, \mathbf{x}_i))^2$ when $D_i(\tau) = 0$.
+$(1 - \hat{S}(\tau, \mathbf{x}_i))^2$ when $D_i(\tau) = 1$.
+
+
+#### How to calculate the IPCW
+
+The IPCW in calculated from **censoring probabilities**, which is the probability of being *uncensored* at time \tau.
+
+The original censoring is as follows:
+
+```{r}
+table(vdata$status)
+```
+
+```{r}
+# Create additional censoring status
+censor.status <- ifelse(vdata$status %in% c(1, 2), 1, 0)
+reversed.censor.status <-  ifelse(vdata$status %in% c(1, 2), 0, 1)
+
+table(censor.status, useNA = "always")
+```
+
+```{r}
+table(reversed.censor.status, useNA = 'always')
+```
+
+
+One could think that the censor probabilities are calculated by using the kaplan meier estimator as follows:
+
+```{r}
+## censor probability
+censor.probability <- function(time, status){
+  # censoring event: 0 is censor, 1 is any event
+  #censor.status <- ifelse(status == 0, 0, 1)
+  #print(table(censor.status))
+  time.max = ceiling(max(time))
+  # Kaplan Meier
+  km       = Surv(time, status)
+  km_fit   = survfit(km ~ 1)
+  km.prob  = summary(km_fit, times=seq(0,(time.max+2),0.2))
+  
+  return(km.prob)
+}
+```
+
+
+```{r}
+# If using 0 == censor, 1 == event
+head(censor.probability(time=vdata$time, status=censor.status))
+```
+```{r}
+# Reversed: If using 1 == censor, 0 == event
+head(censor.probability(time=vdata$time, status=reversed.censor.status))
+```
+
+Let's compare it with the formula in RiskRegression for ipcw ... What is happening in here?
+
+```{r}
+# method = marginal when non-parametric kaplan meier
+test <- riskRegression::ipcw(formula=Surv(time,status)~1,
+     data=vdata, 
+     times=seq(0,(max(vdata$time)+1),0.2),
+     subject.times=time, 
+     method='marginal', 
+     keep = c("fit"))
+
+test$IPCW.times
+```
+
+The event is 187 and the right.censored is 103. This is a problem of not considering competing risks with prodlim or with RiskRegression. The original status == 1 becomes the right.censored, while the status == 2 becomes the event... so that is completly wrong by using these default methods.
+
+If we modify the status to 1 when any event, and 0 when censored:
+
+```{r}
+#censor.status <- ifelse(vdata$status %in% c(1, 2), 1, 0)
+#vdata$censor.status <- censor.status
+# method = marginal when non-parametric kaplan meier
+test <- ipcw(formula=Surv(time,censor.status)~1,
+     data=vdata, 
+     times=seq.int(0,5,0.1),
+     subject.times=time, 
+     method='marginal', 
+     keep = c("fit"))
+test$IPCW.times
+```
+
+
+In riskregression formula they use prodlim:
+
+https://github.com/tagteam/riskRegression/blob/master/R/ipcw.R
+
+https://cran.r-project.org/web/packages/prodlim/prodlim.pdf
+
+The reverse parameter is set to TRUE when the goal is to calculate the censoring distribution when censoring is 0 and event is 1. What it does is to reverse the status (what we have done manually as well above). If 0 is censor, 1 is any event, the reverse would reverse it: 1 is censor and 0 is any event since the goal is the censoring distribution. 
+
+**However if status is 0,1,2... when reversing, we have a NA for the status == 2, and therefore this method does not automatically work with competing risks, unless status is manually modifies to be binary (0:censor, 1:any event).**
+
+If we check again with only using the prodlim:
+
+```{r}
+#ipcw.marginal
+
+fit <- prodlim::prodlim(formula=Surv(time,status)~1,data=vdata,reverse=TRUE)
+
+predict(fit,newdata=vdata,times=seq.int(0,5,0.1),level.chaos=1,mode="matrix",type="surv")
+
+```
+
+I think it does not allow for the status == 2 (therefore converted into NA)
+
+If we change two of the parameters then we get the same as the custom formula censor.probability, reverse=FALSE, status=censor.status:
+
+```{r}
+#ipcw.marginal modified to explain what is changed. 
+
+fit <- prodlim::prodlim(formula=Surv(time,censor.status)~1,data=vdata,reverse=FALSE)
+
+predict(fit,newdata=vdata,times=seq.int(0,5,0.1),level.chaos=1,mode="matrix",type="surv")
+
+```
+
+However, I think the correct is the following, when the reverse is TRUE to estimate the censoring probabilities:
+
+```{r}
+fit <- prodlim::prodlim(formula=Surv(time,censor.status)~1,data=vdata,reverse=TRUE)
+
+predict(fit,newdata=vdata,times=seq.int(0,5,0.1),level.chaos=1,mode="matrix",type="surv")
+```
+
+Just to check that the reverse parameter is what we think, the reversed.censor.status is 1 for censor and 0 for any event, reverse will be set to FALSE. We get the same result as in the previous code.
+
+```{r}
+fit <- prodlim::prodlim(formula=Surv(time,reversed.censor.status)~1,data=vdata,reverse=FALSE)
+
+y <- predict(fit,newdata=vdata,times=seq.int(0,5.1,0.1),level.chaos=1,mode="matrix",type="surv")
+
+y
+```
+
+What about pec?
+
+What is happening in pec: "For right censored data, the right hand side of the formula is used to specify conditional censoring models. For example, set Surv(time,status)~x1+x2 and cens.model="cox". Then the weights are based on a Cox regression model for the censoring times with predictors x1 and x2. Note that the usual coding is assumed: status=0 for censored times and that each variable name that appears in formula must be the column name in data. If there are no covariates, i.e. formula=Surv(time,status)~1 the cens.model is coerced to "marginal" and the Kaplan-Meier estimator for the censoring times is used to calculate the weights. "
+"ipcw.fit. The fitted censoring model that was used for re-weighting the Brier score residuals. See Gerds and Schumacher (2006, Biometrical Journal)"
+
+
+https://rdrr.io/cran/pec/src/R/pec.R
+
+if cens.model is "marginal", pec is in fact using the **RiskRegression::ipcw** and it seems that that is using the prodlim implementation that DOES NOT work well with competing risks.
+
+https://rdrr.io/cran/pec/src/R/ipcw.R
+
+This approach only works with a binary event status (0 for censored, 1 for any event) and does not handle multiple competing risks for censoring probability estimation.
+
+**The censoring probability represents the likelihood that a patient remains uncensored (i.e., continues to be observed) up to a given time t. This probability helps us adjust for patients who are lost to follow-up or have reached the study’s end without experiencing an event**
+
+The difference with survival is the following:
+
+1) Survival Probability is specifically about avoiding the event of interest (e.g., death from colorectal cancer).
+
+2) Censoring Probability is about remaining observable up to a certain time; it’s about the likelihood that the patient stays in the study and is not "lost" for other reasons.
+
+These probabilities are different because censoring and the event of interest are often independent in survival analysis.
+
+In other words:
+Censoring Probability: This is the likelihood that a patient remains observable in the study up to a certain time point. It is unrelated to whether they experience the event of interest (i.e death from colorectal cancer).
+
+Instead, it is related to:
+1) Administrative censoring (when the study ends while the patient is still alive and has not experienced the event),
+2) Loss to follow-up (when the patient stops participating in the study for any reason unrelated to the event of interest).
+
+So, censoring probability addresses whether a patient is censored (lost to follow-up or administratively censored) versus continuing to be observed. It does not measure survival from the event but rather the likelihood that the patient status (event or no event) can still be observed.
+
+When we calculate metrics like the Inverse Probability of Censoring Weight (IPCW), we use the censoring probability. To calculate the censoring probability, we set reverse = TRUE in prodlim, treating censoring as the “event.” This reverse Kaplan-Meier approach only works if we do not differentiate between different causes of death), with the focus on if a patient was observed up to a given time or not.
+
+Given the reverse KM with prodlim, the drop out from the study is quite low, and would suggest that the censoring happens early. 
+
+Is that true?
+
+```{r}
+# Identify and summarize censored individuals
+censored_data <- vdata[vdata$status == 0, ]
+summary(censored_data$time)  # Summarize censoring times
+```
+
+```{r}
+boxplot(censored_data$time)
+```
+
+There is then a small drop at the start, and the first quantile is already at the end of the study. Thus, this data distribution supports the earlier interpretation: ~1% of participants were censored early, explaining the initial drop. ~99% of participants remained in the study (or were censored at the end), and after we have a stable censoring probability of around 0.98 after the initial period.
+
+As it is nicely put in the following package: https://github.com/soda-inria/hazardous/blob/main/hazardous/_ipcw.py#L55
+
+"The term 'IPCW' can be somewhat misleading: IPCW values represent the inverse of the probability of remaining censor-free (or uncensored) at a given time. For instance, at t=0, the probability of being censored is 0, so the probability of being uncensored is 1.0, and its inverse is also 1.0.
+
+By construction, IPCW values are always greater than or equal to 1.0 and can only increase over time. If no observations are censored, the IPCW values remain uniformly at 1.0.
+
+Note: This estimator extrapolates by maintaining a constant value equal to the last observed IPCW value beyond the last recorded time point."
+
+
+```{r}
+## Also in HelperFunctions.R
+
+## Calculate the censoring probabilities
+## Using prodlim
+## Controlling for competing risks
+## No covariates in this function
+censor.prob.KM <- function(time, status, cens.code){
+  tmp <- data.frame(time=time)
+  # Sets the value in status equal to cens.code to 0, the rest to 1
+  # Controlling for competing risks in censoring status
+  tmp$censor.status <- ifelse(status == cens.code, 0, 1) # Not handled in riskRegression with cmprsks
+  time.max = ceiling(max(time))
+  # Fit prodlim, reversed non-parametric survival KM
+  # Switches the censoring status to estimate censoring distribution
+  fit = prodlim::prodlim(formula=Surv(time,censor.status)~1,
+                         data=tmp,
+                         reverse=TRUE)
+  # Predict weights at specific times
+  prob = stats::predict(fit,
+                       times=seq(0,time.max,0.1), # switch for: unique(time) ?
+                       level.chaos=1,
+                       mode="matrix",
+                       type="surv")
+  
+  # Predict weights at subject specific times
+  #ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=1)
+  
+  #out <- list(ipcw.times=ipcw.times, ipcw.subject.times=ipcw.subject.times)
+  
+  out <- cbind(seq(0,time.max,0.1), prob)
+  
+  out <- na.omit(out)
+  
+  return(out)
+}
+```
+
+
+```{r}
+censor.prob.KM(time=vdata$time, status=vdata$status, cens.code=0)
+```
+
+
+
+```{r}
+## Weighted BRIER-SCORE
+WeightedBrierScore <- function(predictions,
+                                       tau,
+                                       time, 
+                                       status,
+                                       cause,
+                                       cens.code){
+  # Extract the censoring probabilities
+  G <- censor.prob.KM(time=time, 
+                         status=status, 
+                         cens.code=cens.code)
+  # G[,1] Time points where censoring probabilities are estimated
+  # G[,2] Estimated censoring probabilities
+  
+  # Create a empty vector for weights
+  n     = length(predictions)
+  W     = rep(0,n)
+  
+  # Binary indicator for individuals that are still at risk
+  Y_tilde = (time > tau)
+  # Binary indicator for individuals that have experienced the event at time tau
+  Y_true  = (time <= tau) * (status == cause)
+  
+  # Calculate G1 and G2
+  # Compute IPCW
+  for( i in 1:n ){
+    
+    # Get the index of censoring time greater or equal than the individual observed times
+    indx1 = which(G[,1] >= time[i])
+    # Get the index of time points greater or equal than evaluation time
+    indx2 = which(G[,1] >= tau)
+    
+    # Calculate G1: censoring probabilities just before observed times T 
+    if( length(indx1) > 0 ){
+      G1 = G[indx1[1],2] # Takes the earliest estimated censoring probabilities 
+    } else {
+      G1 = 1
+    }
+    # Calculate G2: censoring probabilities at tau or greater
+    if( length(indx2) > 0 ){
+      G2 = G[indx2[1],2]
+    } else {
+      G2 = 1
+    }
+    
+    W[i] = Y_tilde[i]/G2 + Y_true[i]/G1        
+
+  }    
+  
+  S    = (1/n)*sum(Y_tilde)
+
+  norm        = 1/n
+  BS          = sum((Y_true - predictions)^2)*norm
+  BS_we       = sum(W*(Y_true - predictions)^2)*norm
+  
+  return(list(brier.score = BS, 
+              weighted.brier.score = BS_we, 
+              tau = tau,
+              n=n, 
+              n.risk=S*n))
+  
+}
+```
+
+
+```{r}
+WeightedBrierScore(predictions=pred,
+                                tau=5,
+                                time=vdata$time, 
+                                status=vdata$status,
+                                cause=primary_event, 
+                                cens.code = 0)
+```
+
+
+The regular Brier score ranges between 0 and 1, where lower values indicate better model performance. However, the Brier score can be hard to interpret on its own, especially when comparing multiple models
+
+### Scaled Brier Score
+
+The scaled Brier score is a normalized version of the Brier score that helps to interpret the predictive performance of a model relative to a baseline model, often the null model. The scaling typically places the Brier score in a range between 0 and 1, where 1 represents perfect prediction and 0 represents no improvement over the null model. 
+
+
+
+$$BS_{sc}(\tau) = 1- \frac{BS(\tau)}{BS(\tau)^\text{Null}} $$
+
+$BS(\tau)$ - Brier Score is the Brier score of the model being evaluated.
+
+$BS^{Null}(\tau)$ - no covariates - Brier score of a baseline or null model, which predicts the same probability for all individuals, usually equal to the overall event rate (i.e., the proportion of individuals experiencing the event of interest) - Can be computed with the Aalen johansen estimator.
+
+$$BS(\tau)^\text{Null} = \frac{1}{N} \sum_{i=1}^{N} W_i(\tau) \cdot \left( D_i(\tau) - f_{i}^\text{Null}(\tau) \right)^2$$
+
+$f^\text{Null}(\tau)$ is the same for all individuals, as it is derived purely from population-level probabilities at time $\tau$
+
+The evaluated model should ideally provide better predictions by incorporating individual-specific covariates, leading to a lower Brier Score.
+
+
+```{r}
+
+ScaledBrierScore <- function(predictions,
+                             predictions_null,
+                             tau,
+                             time, 
+                             status,
+                             cause, 
+                             cens.code){
+  # Number of patients
+  n <- length(predictions)
+  # Length of predictions null
+  pn <- length(predictions_null)
+  # If only a single value is given, repeat it for all observations 
+  if (pn == 1) {predictions_null <- rep(predictions_null, n)}
+  
+  BS_weighted_null <- WeightedBrierScore(predictions = predictions_null,
+                                    tau = tau,
+                                    time = time,
+                                    status = status,
+                                    cause = cause, 
+                                    cens.code = cens.code)$weighted.brier.score
+  
+  BS_weighted <- WeightedBrierScore(predictions = predictions,
+                                tau = tau,
+                                time = time,
+                                status = status,
+                                cause = cause, 
+                                cens.code = cens.code)$weighted.brier.score
+
+
+  BS_scaled = 1 - (BS_weighted/BS_weighted_null)
+  
+  return(list(weighted.brier.score.null = BS_weighted_null, 
+              weighted.brier.score = BS_weighted, 
+              scaled.brier.score = BS_scaled,
+              percentage.scaled.brier.score = BS_scaled*100,
+              tau = tau))
+}
+```
+
+
+```{r}
+
+# Models -------------------
+fit_csh <- riskRegression::CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+fit_csc1 <- fit_csh$models$`Cause 1`
+fit_csc2 <- fit_csh$models$`Cause 2`
+
+# Overall performance measures ----------------
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted probability calculation
+pred <- predictRisk(fit_csh,
+  cause = primary_event,
+  newdata = vdata,
+  times = horizon
+)
+
+BrierScore(predictions=pred, 
+            time = vdata$time, 
+            status = vdata$status,
+            cause=primary_event,
+            tau = horizon)
+```
+
+If the null model is non-parametric, aleen johansen estimator, then we will only have a population level CIF estimator value for a specific time \tau.
+The implementation suports that it is only one value.
+
+```{r}
+
+# Aalen-Johansen estimator on training data
+aj_fit <- prodlim::prodlim(Hist(time, status) ~ 1, data = rdata, reverse = FALSE)
+
+# Predict CIF for new data
+cif_tau <- stats::predict(aj_fit, 
+                    times = 5, 
+                    newdata = vdata, 
+                    cause = primary_event, 
+                    type = "cuminc") # 'survival' if survival case ?
+
+ScaledBrierScore(predictions = pred,
+                 predictions_null = cif_tau,
+                 tau=5,
+                 time=vdata$time,
+                 status=vdata$status,
+                 cause=primary_event, 
+                 cens.code = 0)
+
+```
+
+percentage.scaled.brier.score, can be understood as the percentage of improvement of the evaluated model with respect to the null. 
+
+If the null model is just the same model without covariates, we get the same result. 
+
+```{r}
+
+# Models -------------------
+fit_csh_null <- riskRegression::CSC(Hist(time, status) ~ 1,
+data = rdata
+)
+# Overall performance measures ----------------
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted probability calculation
+pred_null <- predictRisk(fit_csh_null,
+  cause = primary_event,
+  newdata = vdata,
+  times = horizon
+)
+
+ScaledBrierScore(predictions = pred,
+                 predictions_null = pred_null,
+                 tau=5,
+                 time=vdata$time,
+                 status=vdata$status,
+                 cause=primary_event, 
+                 cens.code = 0)
+```
+
+
+In the paper, they generate samples and calculate the metrics on the samples. 
+
+```{r, include=FALSE, eval=FALSE}
+# Bootstrap ------
+# Functions to expand data and calculate Brier, IPA and AUC in bootstrap
+# samples.
+# For Brier and AUC, bootstrap should be computationally faster when
+# data has more than 2000 rows (see ?riskRegression::Score).
+# Our data has 1000 row so we will need only bootstrap to calculate
+# confidence intervals of the scaled Brier (IPA) since
+# it is not provided by riskRegression::Score() function.
+
+
+# Score functions in any bootstrap data
+score_boot <- function(split) {
+  Score(
+    list("csh_validation" = fit_csh),
+    formula = Hist(time, status) ~ 1,
+    cens.model = "km",
+    data = analysis(split),
+    conf.int = TRUE,
+    times = horizon,
+    metrics = c("auc", "brier"),
+    summary = c("ipa"),
+    cause = primary_event,
+    plots = "calibration"
+  )
+}
+
+# Development data
+#rboot <- rboot |> mutate(
+#  score = map(splits, score_boot),
+#  scaled_brier = map_dbl(score, function(x) {
+#    x$Brier$score[model == "csh_validation"]$IPA
+#  })
+#)
+# Validation data
+#vboot <- vboot |> mutate(
+#  score = map(splits, score_boot),
+#  scaled_brier = map_dbl(score, function(x) {
+#    x$Brier$score[model == "csh_validation"]$IPA
+#  })
+#)
+```
+
+In the paper the IPA is the Scaled Brier.... I am not sure if they do it weighted.
+
+Next step: Check if the Score implementation is using ipcw or not for the Scaled Brier. 
+
+#### Inegrated brier score. 
+
+The Integrated Brier Score (IBS) provides an overall measure of model performance across all time points. A lower IBS indicates better predictive performance across the entire follow-up period. It accounts for both early and late prediction accuracy, balancing errors over time.
+
+It is calculated from the weighted Brier Score at each of the evaluation times $\tau$
+
+
+$$IBS = \int^{\tau_{max}}_{\tau_{min}} BS(\tau) d\tau$$
+Since the times of interest are discrete, the integral is numerically approximated using the trapezoidal rule. 
+
+$$IBS \approx \frac{1}{\tau_{\text{max}} - \tau_{\text{min}}} \sum_{j=1}^{K-1} \frac{\tau_{j+1} - \tau_j}{2} \cdot \left( BS(\tau_j) + BS(\tau_{j+1}) \right)$$
+
+
+```{r}
+# Select a range for time evaluations
+tau_range = seq(0,5,0.1)
+# Initialize array
+# Rows: individuals, Columns: time points
+prediction_matrix <- matrix(NA, 
+                           nrow = nrow(vdata), 
+                           ncol = length(tau_range))
+
+colnames(prediction_matrix) <- tau_range 
+
+# Generate a matrix with predictions
+for (j in seq_along(tau_range)){
+  tau <- tau_range[j]
+  
+  # Predicted probability calculation at each tau
+  pred <- predictRisk(fit_csh,
+    cause = primary_event,
+    newdata = vdata,
+    times = tau
+  )
+  
+  # Store the predictions in the j-th column
+  prediction_matrix[, j] <- pred
+
+}
+```
+
+
+```{r}
+
+# For integrated Brier score
+trapezoidal.integration <- function(x, y) {
+  if (length(x) != length(y)) stop("x and y must have the same length")
+  sum(diff(x) * (head(y, -1) + tail(y, -1)) / 2)
+}
+
+## Function to calculate Brier
+IntegratedBrierScore <- function(prediction_matrix,
+                                 taus,
+                                 time,
+                                 status,
+                                 cause, 
+                                 cens.code){
+  
+  # Number of times evaluated the brier score
+  nt <- dim(prediction_matrix)[2]
+  # Initialize a empty vector for brier scores
+  bs <- rep(0, nt)
+  # Loop through array
+  # Rows: individuals, Columns: time points
+  for (j in seq(nt)) {
+    # Get the model prediction and time of evaluation tau
+    tau <- taus[j]
+    predictions <- prediction_matrix[,j] 
+    # Calculate Weighted Brier Score
+    BS_we <- WeightedBrierScore(predictions = predictions,
+                       tau = tau,
+                       time =  time,
+                       status = status,
+                       cause = cause, 
+                       cens.code = cens.code)$weighted.brier.score
+    # Store value 
+    bs[j] <- BS_we
+  }
+  # Calculate max and min time to normalize with respect to time interval
+  t.max = max(taus)
+  t.min = min(taus)
+  # Apply trapezoidal integration
+  ibs <- trapezoidal.integration(bs, taus)/(t.max - t.min)
+  
+ 
+  return(list(integrated.brier.score = ibs,
+              weighted.brier.score = bs,
+              taus = taus))
+}
+
+```
+
+
+```{r}
+IntegratedBrierScore(prediction_matrix = prediction_matrix,
+                                 taus = tau_range,
+                                 time = vdata$time,
+                                 status = vdata$status,
+                                 cause = primary_event, 
+                                 cens.code = 0)
+```
+
+### Next: CI
+
+
+
+

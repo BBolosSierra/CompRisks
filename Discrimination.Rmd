@@ -1,0 +1,321 @@
+---
+title: "Discrimination measures"
+output: html_document
+date: "2024-10-19"
+---
+
+
+# Metrics for survival analysis. 
+
+The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. 
+
+
+```{r}
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(ggplot2)
+library(geepack)
+library(dplyr)
+library(rsample)
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+
+
+```{r}
+# Import data ------------------
+rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
+vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+```
+
+```{r}
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+
+Each model will have a different summary and it is relevant to identify key elements that are needed to calculate the metrics. 
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+
+```{r}
+
+fit_csh <- riskRegression::CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+# useful objects
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted risk estimation
+pred <- riskRegression::predictRisk(fit_csh,
+  cause = primary_event,
+  times = horizon,
+  newdata = vdata
+)
+
+```
+
+```{r message=FALSE}
+# C-index
+# Development set (Apparent validation)
+
+C_rdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = primary_event,
+  eval.times = horizon,
+  data = rdata
+)$AppCindex$CauseSpecificCox
+
+# Validation set
+C_vdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = primary_event,
+  eval.times = horizon,
+  data = vdata
+)$AppCindex$CauseSpecificCox
+
+
+# Bootstraping C-index to calculate the bootstrap percentile confidence intervals
+
+B <- 100
+set.seed(1234)
+rboot <- rsample::bootstraps(rdata, times = B) # development - bootstrap
+vboot <- rsample::bootstraps(vdata, times = B) # validation - bootstrap
+
+C_boot <- function(split) {
+  pec::cindex(
+    object = fit_csh,
+    formula = Hist(time, status_num) ~ 1,
+    cause = primary_event,
+    eval.times = horizon,
+    data = analysis(split)
+  )$AppCindex$CauseSpecificCox
+}
+
+# Run time-dependent AUC in the bootstrapped development and validation data
+# to calculate the non-parametric CI through percentile bootstrap
+rboot <- rboot |> mutate(
+  C_rboot = purrr::map_dbl(splits, C_boot),
+)
+vboot <- vboot |> mutate(
+  C_vboot = purrr::map_dbl(splits, C_boot),
+)
+
+
+# Time-dependent AUC ---------
+
+# Development data
+score_rdata <- Score(
+  list("csh_development" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = rdata,
+  conf.int = TRUE,
+  times = horizon,
+  metrics = c("auc"),
+  cause = primary_event,
+  plots = "calibration"
+)
+
+# Validation data
+score_vdata <- Score(
+  list("csh_validation" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = horizon,
+  metrics = c("auc"),
+  cause = primary_event,
+  plots = "calibration"
+)
+```
+
+
+## Concodance index
+
+The c index ranges from 0.5 (no discriminating ability) to 1.0 (perfect ability to discriminate between patients with different outcomes).
+
+Time-dependent Concordance Index (C(t)) for competing risks and focuses on comparing the relative ordering of risks assigned by the model for individuals experiencing the event of interest at or before a specific time tau.
+
+
+```{r}
+C_rdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = primary_event,
+  eval.times = horizon,
+  data = rdata
+)$AppCindex$CauseSpecificCox
+
+# Validation set
+C_vdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = primary_event,
+  eval.times = horizon,
+  data = vdata
+)$AppCindex$CauseSpecificCox
+
+print(C_rdata)
+print(C_vdata)
+```
+
+### Custom function 
+
+A and B account for the number of risk order pairs.
+  
+A == risk ordering of patients, small time means patient 'i' at higher risk than patient 'j' experiencing event of interest 
+  
+B == risk ordering of patients, large time for patient 'i' means lower risk than patient 'j' if not experienced the event of interest.
+  
+Q == the risk ordering of the subjects, i.e., is subject i assigned a higher risk by the model than the subject j, for event Ek until time t.
+  
+N_t == number of subjects with survival time < time point and experience event of interest
+  
+$$C_k(\tau) = \frac{\sum_{i=1}^N \sum_{j=1}^N (A_{ij} + B_{ij}) \cdot Q_{ij} \cdot N_i^k(\tau)}{\sum_{i=1}^N \sum_{j=1}^N (A_{ij} + B_{ij}) \cdot N_i^k(\tau)}$$
+
+
+```{r}
+CIndexCRisks <- function(predictions, 
+                                      time,
+                                      cens.code, 
+                                      status, 
+                                      cause, 
+                                      tau,
+                                      method=c("survival","cifs")){
+  
+  method = match.arg(method)
+  
+  censor.status <- ifelse(status == cens.code, 0, 1)
+  
+  if( method=="survival" ){ predictions=1-predictions; }
+  
+  n = length(predictions)
+  A = matrix(0, nrow=n, ncol=n)
+  B = matrix(0, nrow=n, ncol=n)
+  Q = matrix(0, nrow=n, ncol=n) 
+  N_t = matrix(0, nrow=n, ncol=n)
+  Num_mat = matrix(0, nrow=n, ncol=n)
+  Den_mat = matrix(0, nrow=n, ncol=n)
+  
+  Num=0
+  Den=0
+  for (i in  1:n){
+    #print(n)
+    A[i,which(time[i] < time)] = 1 
+    B[i, intersect(intersect(which((time[i] >= time)),
+                             which(status!=cause)), which(censor.status==1))] = 1
+    Q[i,which(predictions[i]>predictions)]=1
+  }
+  
+  for (i in 1:n){
+    if(time[i]<=tau && status[i]==cause && censor.status[i]==1){
+      N_t[i,] = 1
+    }
+  }
+  
+  Num_mat = (A+B)*Q*N_t
+  Den_mat = (A+B)*N_t
+  
+  Num = sum(Num_mat)
+  Den = sum(Den_mat)
+  
+  return(Num/Den)
+  
+}
+```
+
+```{r}
+CIndexCRisks(predictions=pred,
+                          time = vdata$time,
+                          cens.code = 0,
+                          status=vdata$status,
+                          cause= primary_event, 
+                          tau=horizon,
+                          method = "cifs")
+```
+
+```{r}
+source("CompRisksMetrics/ConcordanceIndexMTimes.R") 
+```
+
+
+```{r}
+taus <- c(1,3,5) 
+
+# Predicted risk estimation
+preds <- predictRisk(fit_csh,
+  cause = primary_event,
+  times = taus,
+  newdata = vdata
+)
+
+CIndexCRisksMTimes(predictions=preds,
+                          time = vdata$time,
+                          cens.code = 0,
+                          status=vdata$status,
+                          cause= primary_event, 
+                          taus=taus,
+                          method = "cifs")
+```
+
+### Ties 
+
+How to handle ties: 
+
+1) Ties can happen when $\tau_{i} = \tau_{j}$ when two individuals have the same but different outcome. 
+
+
+2) Ties can happen when the prediction value is the same for both individuals 
+the model does not differentiate between individuals i and j in terms of risk ranking.
+
+Approaches: 
+
+- They can still be comparable pairs if one individual experience the event, and the other individual the competing risk.  If both individuals have the same event type and time, they are not considered comparable for concordance.
+
+- These pairs can be treated as "partially concordant", with fractional credit (e.g., 0.5) given for ties.
+    \[
+    Q_{ij} =
+    \begin{cases}
+    1, & \text{if } f_i > f_j, \\
+    0.5, & \text{if } f_i = f_j, \\
+    0, & \text{if } f_i < f_j.
+    \end{cases}
+    \]
+
+- Tied predicted risks are excluded from the calculation altogether.
+
+- Penalized ties (e.g., $Q_{ij} =0.5−\epsilon$, where \epsilon is a small positive value) to discourage models that frequently produce tied predictions.
+\[
+    Q_{ij} =
+    \begin{cases}
+    1, & \text{if } f_i > f_j, \\
+    0.5 - \epsilon, & \text{if } f_i = f_j, \\
+    0, & \text{if } f_i < f_j.
+    \end{cases}
+    \]
+- Break ties randomly ... assigning randomly 0 or 1 to the Q.
+
+
+
+### Next CI 
+
+### Next: How to handle ties
+
+### Next Include AUC. 

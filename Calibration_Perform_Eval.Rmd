@@ -1,0 +1,1222 @@
+---
+title: "Calibration metrics"
+output: html_document
+date: "2024-10-09"
+---
+
+
+# Metrics for survival analysis. 
+
+The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. For instance, if metrics such calibration or brier score need to be calculated, the model fit to the data must be an object of a riskregression class, to be able to use Score function that calculates the metrics. That limitis the models that can be fit. 
+
+The goal of these markdowns is to demostrate that we could calculate metrics from the CIF predictions of any model, without relying on riskRegression. 
+
+
+
+```{r}
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(ggplot2)
+library(geepack)
+library(dplyr)
+library(tidyr)
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+
+
+```{r}
+# Import data ------------------
+rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
+vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+```
+
+## Calibration
+
+Calibration refers to the agreement between observed outcome proportions and risk estimates from the prediction model. For example, if the model predicted a 30% absolute risk of colorectal cancer recurrence by three years on average. This implies that if the model is well calibrated on average, we expect to observe a recurrence event in about 30% of the patients in the validation set within three years. 
+Ideally, calibration is not only adequate on average (known as calibration in the large), but predictions should be accurate at every level of risk, from the lowest to the highest. For instance, if a model predicts a 20% risk for some individuals and an 80% risk for others, the observed outcomes for both groups should correspond closely to these predicted risks, not just the overall average across all predictions.
+
+We can use the same as in the paper we are focussing on. To be sure we are getting the same results as with RiskRegression.
+
+```{r}
+# Number of patients for each event in test 
+table(vdata$status_num)
+```
+
+```{r}
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+### Calibration plot 
+
+"How close is each estimated risk (or risk group) to the observed outcome proportion?"
+
+When constructing the calibration curve, you can group individuals based on Risk Estimates, which involves dividing individuals into groups (often deciles) based on their predicted risk (CIFs). Within each group, the observed outcome proportion is estimated (it is the observed cumulative incidence) and it is ploted against the average predicted risk for that group. 
+
+However, it is arbitrarily categorizing individuals and lead to a loss of information. Therefore it is suggested to use alternative methods that smooth the curve such 1) Pseudo-observations 2) Flexible regression approach (Fine and Grey)
+
+The smoothed curve should only be plotted over the range of observed risks and not extrapolated beyond.
+
+#### Calibration plot using pseudo-observations (LOESS smoothing)
+
+One way is to use pseudo-observations. Pseudo-observation approximate the individual contribution to the overall CIF estimate by using leave-one-out approach. First, the CIF is estimated for all the individuals at a given time point. Then, the estimate is recalculated removing one individual at a time. These estimations are based on non-parametric calculation of the CIF (Aalen Johansen estimator). 
+
+It is a technique that allow to handle censoring and competing risks data by creating proxy estimate for all the individuals.
+
+$$Pseudovalues_{i}(tau, k) = n \hat{CIF}_{k}(tau) - (n-1)\hat{CIF}_{k}^{(-i)}(tau)$$
+
+It is an small sample, therefore pseudovalues might be very extreme due to the removal of an individual having an extreme effect in the calculation of the CIF estimation.
+
+
+##### Demonstration that RiskRegression is not necessary
+
+In the paper it is done in the following way, depending on the riskRegression package to calculate everything: 
+
+```{r}
+## How it is done in RiskRegression
+fit_csh <- CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+# useful objects
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted risk estimation
+pred <- predictRisk(fit_csh,
+  cause = primary_event,
+  times = horizon,
+  newdata = vdata
+)
+
+# Calibration plot (pseudo-obs approach) ----------------------------------
+# First compute riskRegression::Score()
+score_vdata <- Score(
+  list("csh_validation" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = horizon,
+  #  metrics = c("auc", "brier"),
+  summary = c("ipa"),
+  cause = primary_event,
+  plots = "calibration"
+)
+
+calplot_pseudo <- plotCalibration(
+  x = score_vdata,
+  brier.in.legend = FALSE,
+  auc.in.legend = FALSE,
+  cens.method = "pseudo",
+  bandwidth = 0.05, # leave as NULL for default choice of smoothing
+  cex = 1,
+  round = FALSE, # Important, keeps all unique risk estimates rather than rounding
+  xlim = c(0, 0.6),
+  ylim = c(0, 0.6),
+  rug = TRUE,
+  xlab = "Predictions",
+  bty = "n"
+)
+title("Calibration plot using pseudo observations")
+```
+
+```{r}
+# Fit a LOESS smooth curve to the pseudo-values vs predicted CIFs
+ggplot(calplot_pseudo$plotFrames$csh_validation, aes(x = Pred, y = Obs)) +
+  geom_point(alpha = 0.5) +  # Add points for each individual
+  geom_line() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +  # Ideal calibration line
+  labs(
+    x = "Predicted CIF ",
+    y = "Observed (Pseudo-Values)",
+    title = "Calibration Plot for CIF using Pseudovalues"
+  ) +
+  theme_minimal()
+```
+```{r}
+# From RiskRegression
+# Fit a LOESS smooth curve to the pseudo-values vs predicted CIFs
+ggplot(calplot_pseudo$plotFrames$csh_validation, aes(x = Pred, y = Obs)) +
+  geom_point(alpha = 0.5) +  # Add points for each individual
+  geom_smooth(method = "loess", color = "blue") +  # Add a smooth curve using LOESS
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +  # Ideal calibration line
+  labs(
+    x = "Predicted CIF ",
+    y = "Observed (Pseudo-Values)",
+    title = "Calibration Plot for CIF using Pseudovalues"
+  ) +
+  theme_minimal()
+```
+
+Extracting pseudovalues and prediction from the model
+
+```{r}
+# Obs is the pseudovalues
+# Pred is the prediction from the model
+head(calplot_pseudo$plotFrames$csh_validation)
+```
+
+
+However, we do not want to depend on riskRegression, since it is inflexible with the models to fit the data with. 
+
+To do so, we can calculate pseudovalues with pseudoci or prodlim by using nearest neighboors for kernel smoothing.
+
+
+First, make sure that the outputs are the same
+
+```{r}
+# Can we get the same pseudovalues with an alternative approach: 
+p <- pred
+pframe <- score_vdata$Calibration$plotframe
+
+# Look into the pseudovalues
+#pframe[model=="csh_validation", pseudovalue]
+
+# they are the same: 
+#cbind(sort(pframe[model=="csh_validation", risk]), sort(pred))
+
+```
+
+```{r}
+hist(pframe[model=="csh_validation", pseudovalue])
+```
+
+The pseudovalues are in fact a extreme values close to 0s or 1s.
+
+We can also calculate the pseudovalues alternatively with pseudoci or prodlim:
+
+```{r}
+# How to calculate pseudovalues:
+
+# 1) With prodlim
+margForm <- prodlim::Hist(time,status_num,cens.code=0)~1
+margFit  <- prodlim::prodlim(margForm,data=vdata)
+                ## position.cause is the result of match(cause, states)
+jackF = prodlim::jackknife(margFit,
+                               cause=1, 
+                               times=horizon)
+
+# 2) With pseudoci
+pseudo <- pseudo::pseudoci(vdata$time, vdata$status_num, tmax= horizon)$pseudo$cause1
+
+```
+
+In order to use pseudovalues for calibration, we need to smooth the values. For that we can use prodlim and kernel smoothing. 
+
+
+####  1. Risk Estimate - Discretize intervals (deciles)
+
+First we will generate deciles (10 quantiles) of the predicted values. For each interval, mean values would be computed. Prodlim is then fitted with the discretized intervals. 
+
+```{r}
+
+# Number of quantiles, default 10 (deciles)
+q = 10
+groups = q
+# Create the 10 levels of intervals for predicted risk
+pcut <- cut(p,groups,include.lowest=TRUE)
+# Calculate the mean per each of the 10 levels
+Pred=tapply(p,pcut,mean)
+# Levels as dataset
+newdata=data.frame(pcut=levels(pcut))
+
+# Fit prodlim. Discrete predictor variable: pcut 
+# If status is used, then it believes it is binary. 
+#qfit <- prodlim::prodlim(prodlim::Hist(time,status,cens.code="0")~pcut,data=pfra
+qfit2 <- prodlim::prodlim(formula = prodlim::Hist(time, status_num, cens.code = 0) ~ pcut, data = vdata)
+
+# plot
+plotFrame=data.frame(Pred=tapply(p,pcut,mean),
+                     Obs=predict(qfit2,
+                     newdata=data.frame(pcut=levels(pcut)),
+                     cause=1,
+                     mode="matrix",
+                     times=horizon,
+                     type="cuminc"))
+plotFrame
+
+
+# Fit a LOESS smooth curve to the pseudo-values vs predicted CIFs
+ggplot(plotFrame, aes(x = Pred, y = Obs)) +
+  geom_smooth(method = "loess", color = "blue") +
+  geom_point(alpha = 0.5) +  # Add points for each individual
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +  # Ideal calibration line
+  labs(
+    x = "Predicted CIF ",
+    y = "Observed (Pseudo-Values)",
+    title = "Calibration Plot for CIF using Pseudovalues"
+  ) +
+  theme_minimal()
+```
+
+
+####  2: Apply kernel smoothing and LOESS smothing
+
+From tagteam/prodlim: Product-Limit Estimation for Censored Event History Analysis.
+As in RiskRegression we can apply the prodlim nearest neighbours kernel smoothing:
+
+```{r}
+# Nearest neighbours and Kernel smoothing
+p <- pred # p is the model predicted risk 
+#p <- round(p,2)
+p <- na.omit(p)
+
+# If bandwidth to be calculated with prodlim
+#bw <- prodlim::neighborhood(p, bandwidth = NULL)$bandwidth
+
+# If set bandwidth
+bw = 0.05
+
+# Kernel smoothing
+# 1) Step by step
+nbh_test <- prodlim::neighborhood(x=p, bandwidth = bw)
+levs=rep(1:nbh_test$nu,nbh_test$size.nbh)
+nbh_test.list <- split(pseudo[nbh_test$neighbors],levs)
+out <-data.frame(x=nbh_test$values, y=sapply(nbh_test.list,mean))
+names(out) <- c("uniqueX","averageY")
+plotFrame <- data.frame(Pred=nbh_test$uniqueX,Obs=nbh_test$averageY)
+
+# 2) All at once:
+nbh <- prodlim::meanNeighbors(x=p,y=pseudo,bandwidth=bw)
+plotFrame <- data.frame(Pred=nbh$uniqueX,Obs=nbh$averageY)
+
+# these methods should be giving the same result.
+#plotFrame
+```
+```{r}
+ggplot(plotFrame, aes(x = Pred, y = Obs)) +
+  geom_point(alpha = 0.5) +  # Add points for each individual
+  geom_smooth(method = "loess", color = "blue") +  # Add a smooth curve using LOESS
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +  # Ideal calibration line
+  labs(
+    x = "Predicted CIF ",
+    y = "Observed (Pseudo-Values)",
+    title = "Calibration Plot for CIF using Pseudovalues"
+  ) +
+  theme_minimal()
+```
+
+We get the same result as with the RiskRegression package, without the need of using their models. 
+
+```{r}
+#cbind(calplot_pseudo$plotFrames$csh_validation, plotFrame)
+```
+
+
+##### Custom function outside RiskRegression
+
+If bandwith is set to NULL, then bandwith is calculated
+
+
+```{r}
+test_calibration_cmprsk_pseudo <- function(p, # model preds
+                                data, 
+                                time, 
+                                status, 
+                                horizon, 
+                                cause=1, 
+                                cens.code=0,
+                                method=c("prodlim", 
+                                         "pseudoci"),
+                                quantiles=10,
+                                kernel_smoothing = TRUE,
+                                bandwidth = NULL) {
+  
+  if (method == "prodlim"){
+    # calculate pseudovalues with prodlim
+    margForm <- prodlim::Hist(time, status,
+                              cens.code=cens.code)~1
+    margFit  <- prodlim::prodlim(margForm,data=data)
+    pseudo   <- prodlim::jackknife(margFit,
+                                    cause=cause, 
+                                    times=horizon)
+    
+  } else {
+    pseudo <- pseudo::pseudoci(time, 
+                               status, 
+                               tmax=horizon)$pseudo$cause1
+  }
+  
+  # Smooth with nearest neighbours-kernel smoothing
+  if (kernel_smoothing){
+    #p <- round(p,2)
+    p  <- na.omit(p)
+    bw <- bandwidth
+    if (is.null(bandwidth)) {
+      bw <- prodlim::neighborhood(p, bandwidth)$bandwidth
+    }
+    nbh <- prodlim::meanNeighbors(x=p,y=pseudo,bandwidth=bw)
+    plotFrame <- data.frame(Pred=nbh$uniqueX,Obs=nbh$averageY)
+    
+  } else {
+    # Deciles
+    q = quantiles
+    groups = q
+    
+    # Create the 10 levels of intervals for predicted risk
+    pcut <- cut(p,groups,include.lowest=TRUE)
+    # Calculate the mean per each of the 10 levels
+    Pred=tapply(p,pcut,mean)
+    # Levels as dataset
+    newdata=data.frame(pcut=levels(pcut))
+    
+    # Fit prodlim. Discrete predictor variable: pcut 
+    qfit <- prodlim::prodlim(formula = 
+                               prodlim::Hist(time,
+                                             status,
+                                             cens.code) ~ pcut, 
+                             data = data)
+    # Observed risk 
+    Obs = prodlim::predict(qfit, newdata =
+                             data.frame(pcut=levels(pcut)))
+    # 
+    plotFrame=data.frame(Pred=tapply(p,pcut,mean),
+                         Obs=Obs,
+                         cause=1,
+                         mode="matrix",
+                         times=horizon,
+                         type="cuminc")
+  }
+  
+}
+```
+
+```{r}
+# Implementation. Bandwidth = 0.05 as in the LUNC example
+plotFrame <- test_calibration_cmprsk_pseudo(p=pred,
+                               data=vdata, 
+                                time=vdata$time, 
+                                status=vdata$status, 
+                                horizon = horizon, 
+                                cause=1, 
+                                cens.code=0,
+                                method="pseudci",
+                                quantiles=10,
+                                kernel_smoothing = TRUE,
+                                bandwidth = 0.05
+                               )
+
+ggplot(plotFrame, aes(x = Pred, y = Obs)) +
+  geom_point(alpha = 0.5) +  # Add points for each individual
+  geom_smooth(method = "loess", color = "blue") +  # Add a smooth curve using LOESS
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +  # Ideal calibration line
+  labs(
+    x = "Predicted CIF ",
+    y = "Observed (Pseudo-Values)",
+    title = "Calibration Plot for CIF using Pseudovalues"
+  ) +
+  theme_minimal()
+
+```
+
+It would be nice to get all the methods in one formula. 
+
+A different way of dealing with the Loess curve. 
+
+```{r}
+# Use linear loess (degree = 1) to fit a smooth curve
+smooth_pseudos <- predict(
+  stats::loess(Obs ~ Pred, data = plotFrame,
+               degree = 1, 
+               span = 0.33), 
+               se = TRUE
+)
+
+# Optionally, plot the calibration curve
+plot(plotFrame$Pred, plotFrame$Obs, pch = 16, 
+     xlab = "Predicted Risk", ylab = "Observed Pseudovalue (CIF)",
+     main = "Calibration Curve using Pseudo-Observations")
+lines(plotFrame$Pred, smooth_pseudos$fit, col = "blue", lwd = 2)
+```
+
+As presented in the paper... https://www.bmj.com/content/377/bmj-2021-069249
+
+For the case where we have not done the kernel smoothing for our calibration with pseudovalues, we can also directly calculate the pseudovalues and see the calibration plot:
+
+```{r}
+# Use pseudo-observations calculated by Score() (can alternatively use pseudo::pseudoci)
+pseu <- data.frame(score_vdata$Calibration$plotframe)
+pseu <- pseu[order(pseu$risk), ]
+
+# Use linear loess (weighted local regression with polynomial degree = 1) smoothing
+smooth_pseudos <- predict(
+  stats::loess(pseudovalue ~ risk, data = pseu, degree = 1, span = 0.33), 
+  se = TRUE
+)
+
+# Calibration plot (reported in manuscript):
+
+# First, prepare histogram of estimated risks for x-axis
+spike_bounds <- c(-0.075, 0)
+bin_breaks <- seq(0, 0.6, length.out = 100 + 1)
+freqs <- table(cut(pred, breaks = bin_breaks))
+bins <- bin_breaks[-1]
+freqs_valid <- freqs[freqs > 0]
+freqs_rescaled <- spike_bounds[1] + (spike_bounds[2] - spike_bounds[1]) * 
+  (freqs_valid - min(freqs_valid)) / (max(freqs_valid) - min(freqs_valid))
+
+# Produce plot
+par(xaxs = "i", yaxs = "i", las = 1)
+plot(
+  x = pseu$risk, 
+  y = pseu$pseudovalue,
+  xlim = c(0, 0.6), 
+  ylim = c(spike_bounds[1], 0.6),
+  yaxt = "n",
+  frame.plot = FALSE,
+  xlab = "Estimated risks",
+  ylab = "Observed outcome proportions", 
+  type = "n"
+)
+axis(2, seq(0, 0.6, by = 0.1), labels = seq(0, 0.6, by = 0.1))
+polygon(
+  x = c(pseu$risk, rev(pseu$risk)),
+  y = c(
+    pmax(smooth_pseudos$fit - qt(0.975, smooth_pseudos$df) * smooth_pseudos$se, 0),
+    rev(smooth_pseudos$fit + qt(0.975, smooth_pseudos$df) * smooth_pseudos$se)
+  ),
+  border = FALSE,
+  col = "lightgray"
+)
+abline(a = 0, b = 1, col = "gray")
+lines(x = pseu$risk, y = smooth_pseudos$fit, lwd = 2)
+segments(
+  x0 = bins[freqs > 0], 
+  y0 = spike_bounds[1], 
+  x1 = bins[freqs > 0], 
+  y1 = freqs_rescaled
+)
+```
+
+Same result with our predictions and pseudovalues independent from the riskRegression as shown below
+
+```{r}
+# Values using pseudoci and prediction from any model:
+pseudo <- pseudo::pseudoci(vdata$time, vdata$status_num, tmax= horizon)$pseudo$cause1
+
+pseu <- data.frame(cbind(pseudo, pred))
+names(pseu) <- c("pseudovalue", "risk")
+pseu <- pseu[order(pseu$risk), ]
+
+# Use linear loess (weighted local regression with polynomial degree = 1) smoothing
+smooth_pseudos <- predict(
+  stats::loess(pseudovalue ~ risk, data = pseu, degree = 1, span = 0.33), 
+  se = TRUE
+)
+
+# Calibration plot (reported in manuscript):
+
+# First, prepare histogram of estimated risks for x-axis
+spike_bounds <- c(-0.075, 0)
+bin_breaks <- seq(0, 0.6, length.out = 100 + 1)
+freqs <- table(cut(pred, breaks = bin_breaks))
+bins <- bin_breaks[-1]
+freqs_valid <- freqs[freqs > 0]
+freqs_rescaled <- spike_bounds[1] + (spike_bounds[2] - spike_bounds[1]) * 
+  (freqs_valid - min(freqs_valid)) / (max(freqs_valid) - min(freqs_valid))
+
+# Produce plot
+par(xaxs = "i", yaxs = "i", las = 1)
+plot(
+  x = pseu$risk, 
+  y = pseu$pseudovalue,
+  xlim = c(0, 0.6), 
+  ylim = c(spike_bounds[1], 0.6),
+  yaxt = "n",
+  frame.plot = FALSE,
+  xlab = "Estimated risks",
+  ylab = "Observed outcome proportions", 
+  type = "n"
+)
+axis(2, seq(0, 0.6, by = 0.1), labels = seq(0, 0.6, by = 0.1))
+polygon(
+  x = c(pseu$risk, rev(pseu$risk)),
+  y = c(
+    pmax(smooth_pseudos$fit - qt(0.975, smooth_pseudos$df) * smooth_pseudos$se, 0),
+    rev(smooth_pseudos$fit + qt(0.975, smooth_pseudos$df) * smooth_pseudos$se)
+  ),
+  border = FALSE,
+  col = "lightgray"
+)
+abline(a = 0, b = 1, col = "gray")
+lines(x = pseu$risk, y = smooth_pseudos$fit, lwd = 2)
+segments(
+  x0 = bins[freqs > 0], 
+  y0 = spike_bounds[1], 
+  x1 = bins[freqs > 0], 
+  y1 = freqs_rescaled
+)
+```
+
+#### Calibration plot using subdistributions 
+
+Although the Fine and Grey model for calibration is done by using riskRegression, our initial predictions are not required to come from any riskRegression method.
+
+Complementary log-log transformation is applied to predicted probabilities. The cloglog link is often used to model event times and helps linearize relationships between covariates and hazards
+
+A natural cubic spline creating spline basis functions is generated from the clog-log. The higher number of internal knots, the more flexible are the splines. The splines add flexibility to the regression model, allowing it to capture non-linear relationships between predicted probabilities and the observed outcomes (i.e., cumulative incidence). Using splines helps model complex relationships without overfitting.
+
+A Fine-Gray subdistribution hazard model is fitted based on the basis. The model relates the subdistribution hazard of the event of interest (cause "1") to the spline basis functions of the transformed predicted probabilities.
+The observed values ploted against the predicted by the model, are in fact the prediction from the Fine and grey model with the basis functions as covariates. 
+
+```{r}
+# Our predicted probabilities from any model
+# These are our CIFs
+vdata$pred <- p
+
+# complementary log-log
+vdata$cll_pred <- log(-log(1 - p))
+
+# Splines
+# 5 knots seems to give somewhat equivalent graph to pseudo method with bw = 0.05
+n_internal_knots <- 5 # Austin et al. advise to use between 3 (more smoothing, less flexible) and 5 (less smoothing, more flexibl)
+rcs_vdata <- splines::ns(vdata$cll_pred, df = n_internal_knots + 1)
+colnames(rcs_vdata) <- paste0("basisf_", colnames(rcs_vdata))
+vdata_bis <- cbind.data.frame(vdata, rcs_vdata)
+
+# Use subdistribution hazards (Fine-Gray) model
+form_fgr <- reformulate(
+  termlabels = colnames(rcs_vdata),
+  response = "prodlim::Hist(time, status_num)"
+)
+
+# Regress subdistribution of event of interest on cloglog of estimated risks
+calib_fgr <- riskRegression::FGR(
+  formula = form_fgr,
+  cause = "1",
+  data = vdata_bis
+)
+
+# Add observed and predicted together in a data frame
+dat_fgr <- cbind.data.frame(
+  "obs" = predict(calib_fgr, times = horizon, newdata = vdata_bis),
+  "pred" = vdata$pred
+)
+```
+
+```{r}
+# Calibration plot
+dat_fgr <- dat_fgr[order(dat_fgr$pred), ]
+par(xaxs = "i", yaxs = "i", las = 1)
+plot(
+  x = dat_fgr$pred,
+  y = dat_fgr$obs,
+  type = "l",
+  xlim = c(0, 0.6),
+  ylim = c(0, 0.6),
+  xlab = "Predictions",
+  ylab = "Observed outcome proportion",
+  bty = "n"
+)
+abline(a = 0, b = 1, lty = "dashed", col = "red")
+title("Calibration plot using subdistribution hazard approach", 
+      cex.main = .90)
+```
+
+How to interpret: Good calibration if the smooth curves follow the diagonal line. Meaning that the prediction are well-calibrated across the different risk levels. 
+If the curves lies below the diagonal line it indicates that the model is overestimating the risk. The individuals are less likely to experience the event than what the model is predicting. 
+If the curves lies above, the model is underestimating the risk. The true event probabilities are higher than the model's predictions. 
+
+##### Custom function
+
+Gathering all in the same function
+
+```{r}
+source("CompRisksMetrics/CalibrationPlot.R")
+
+plotFrame <- CalibrationPlot(predictions=pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 method="pseudovalues",
+                                 predictions.type = "CIF",
+                                 bandwidth = 0.05,
+                                 quantiles=10,
+                                 n.knots = 5,
+                                 graph = TRUE
+                                 )
+
+# Fit a LOESS smooth curve to the pseudo-values vs predicted CIFs
+plotFrame$graph
+```
+```{r}
+tail(plotFrame$values)
+```
+
+
+```{r}
+plotFrame <- CalibrationPlot(predictions=pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 method="subdistribution",
+                                 predictions.type = "CIF",
+                                 bandwidth = 0.05,
+                                 quantiles=10,
+                                 n.knots = 5,
+                                 graph = TRUE
+                                 )
+
+# Fit a LOESS smooth curve to the pseudo-values vs predicted CIFs
+plotFrame$graph
+```
+```{r}
+tail(plotFrame$values)
+```
+
+```{r}
+source('CompRisksMetrics/CalibrationPlotMTimes.R')
+```
+
+
+```{r}
+taus <- c(1,3,5) 
+
+# Predicted risk estimation
+preds <- predictRisk(fit_csh,
+  cause = primary_event,
+  times = taus,
+  newdata = vdata
+)
+
+result <- CalibrationPlotMTimes(predictions = preds,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 taus=c(1,3,5), 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "pseudovalues",
+                                 n.knots = 5,
+                                 graph = TRUE
+                                 )
+
+result[[1]]$graph
+result[[2]]$graph
+result[[3]]$graph
+```
+
+
+### Numerical summaries of calibration 
+
+For a specific time (\tau)
+
+ICI - Integrated Calibration Index - The ICI is the mean absolute difference between the predicted and observed cumulative incidence function (CIF). It represents the average calibration error. A lower ICI value indicates better calibration, meaning the predicted CIFs are closer to the observed CIFs on average. A 0 means perfect alignment between observed and predicted. 
+
+E50 (50th Percentile of Absolute Error) - median absolute error between the predicted and observed CIFs. A lower E50 would mean that the error (middle value of the error) is small. 0, indicating that for 50% of the individuals, the predicted CIFs closely match the observed CIFs.
+
+E90 (90th Percentile of Absolute Error) - This gives an idea of how large errors (the upper 10%) behave. A lower value indicates that even larger errors tend to be small.
+
+Emax (Maximum Absolute Error) - how far off the worst-case prediction is from the observed data. A lower value indicates that the model does not have any extreme miscalibrations
+
+RMSE - overall prediction error by taking the square root of the mean of squared differences between predicted and observed CIFs. It penalizes larger errors more heavily than smaller ones due to the squaring of errors. 
+
+Here, with the subdistribution hazard:
+
+
+```{r}
+# Numerical summary measures
+diff_fgr <- dat_fgr$obs - dat_fgr$pred
+
+numsum_fgr <- c(
+  "ICI" = mean(abs(diff_fgr)),
+  setNames(quantile(abs(diff_fgr), c(0.5, 0.9)), c("E50", "E90")),
+  "Emax" = max(abs(diff_fgr)),
+  "Root squared bias" = sqrt(mean(diff_fgr^2))
+)
+
+print(numsum_fgr)
+```
+
+```{r}
+boxplot(diff_fgr)
+
+# Calculate required statistics
+mean_val <- mean(diff_fgr)
+median_val <- median(diff_fgr)
+quantile_90 <- quantile(diff_fgr, 0.9)
+max_val <- max(diff_fgr)
+
+points(mean(diff_fgr), col = "blue", pch = 19, cex = 1.2)  # Mean as a blue dot
+points(median(diff_fgr), col = "red", pch = 19, cex = 1.2)  # Median as a red dot
+points(quantile(diff_fgr, 0.9), col = "purple", pch = 19, cex = 1.2)  # 90th quantile as a purple dot
+points(max(diff_fgr), col = "green", pch = 19, cex = 1.2)  # Max value as a green dot
+
+```
+
+
+Here for the pseudovalues:
+
+When we use the psedovalues without the kernel smoothing, the difference between predictions and pseudovalues are high, due to the extreme values that pseudovalues have close to 0 and 1.
+Therefore is best to use after kernel smothing
+
+```{r}
+plotFrame <- CalibrationPlot(predictions=pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 method="pseudovalues",
+                                 predictions.type = "CIF",
+                                 bandwidth = 0.05,
+                                 quantiles=10,
+                                 n.knots = 5,
+                                 graph = FALSE
+                                 )
+
+
+# Calculate difference between predicted and observed
+diff_pseudo <- plotFrame$pred - plotFrame$obs
+
+# Collect all numerical summary measures
+numsum_pseudo <- c(
+  "ICI" = mean(abs(diff_pseudo)),
+  setNames(quantile(abs(diff_pseudo), c(0.5, 0.9)), c("E50", "E90")),
+  "Emax" = max(abs(diff_pseudo)),
+  "Root squared bias" = sqrt(mean(diff_pseudo^2))
+)
+
+print(numsum_pseudo)
+
+```
+
+Which gives similar result as the paper using RiskRegression
+
+```{r}
+# We can extract predicted and observed, observed will depend on degree of smoothing (bandwidth)
+dat_pseudo <- calplot_pseudo$plotFrames$csh_validation
+
+# Calculate difference between predicted and observed (make sure to use all estimated risks, not just unique ones)
+diff_pseudo <- pred - dat_pseudo$Obs[match(pred, dat_pseudo$Pred)]
+
+# Collect all numerical summary measures
+numsum_pseudo <- c(
+  "ICI" = mean(abs(diff_pseudo)),
+  setNames(quantile(abs(diff_pseudo), c(0.5, 0.9)), c("E50", "E90")),
+  "Emax" = max(abs(diff_pseudo)),
+  "Root squared bias" = sqrt(mean(diff_pseudo^2))
+)
+
+print(numsum_pseudo)
+```
+
+Interpretation: 
+
+ICI - In this case, the low value indicates that the model predicitons are well-calibrated, low diff between predicted and observed probabilities.
+
+E50 - median absolute calibration error - Essentially, half of the predicted probabilities have an error less than this value. A low value like 0.0298 implies that the typical (median) prediction is fairly accurate in terms of its deviation from the observed outcome. 
+
+E90 - calibration error at the 90th percentile, meaning that 90% of the predictions have an error smaller than this value. This helps to identify whether there are some predictions with larger errors. A value of 0.0524 indicates that the larger errors are not extreme, which is a good sign for overall calibration.
+
+Emax is the largest observed calibration error, indicating the worst-case miscalibration. A value of 0.1584 suggests that while most predictions are reasonably accurate, there are some cases with significant miscalibration.
+
+#### Custom function 
+
+```{r}
+source('CompRisksMetrics/CalibrationNumericalMeasures.R')
+```
+
+```{r}
+result <- CalibrationNumericalMeasures(predictions=pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 method="pseudovalues",
+                                 predictions.type = "CIF",
+                                 bandwidth = 0.05,
+                                 quantiles=10,
+                                 n.knots = 5
+                                 )
+
+result$calibr.measures
+```
+
+```{r}
+source('CompRisksMetrics/CalibrationNumericalMeasuresMTimes.R')
+```
+
+```{r}
+
+taus <- c(1,3,5) 
+
+# Predicted risk estimation
+preds <- predictRisk(fit_csh,
+  cause = primary_event,
+  times = taus,
+  newdata = vdata
+)
+
+result <- CalibrationNumericalMeasuresMTimes(predictions = preds,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 taus=c(1,3,5), 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "pseudovalues",
+                                 bandwidth = 0.05
+                                 )
+
+result$calibr.measures
+```
+```{r}
+# Prepare data for the boxplot
+error_data <- data.frame(
+  Time = rep(1:3, each = length(result$error[[1]])),
+  Error = unlist(result$error),
+  Group = rep(c("error1", "error2", "error3"), each = length(result$error[[1]]))
+)
+
+# Prepare data for the line plot of calibration measures
+calib_data <- bind_rows(
+  lapply(1:3, function(i) {
+    calib <- result$calibr.measures[[i]]
+    data.frame(
+      Group = paste0("error",i),
+      ICI = calib[["ICI"]],
+      E50 = calib[["E50"]],
+      E90 = calib[["E90"]],
+      Emax = calib[["Emax"]]
+    )
+  }), .id = "TimePoint"
+) %>% pivot_longer(cols = ICI:Emax, names_to = "Measure", values_to = "Value")
+
+# Plot boxplot for errors
+p <- ggplot(error_data, aes(x = factor(Time), y = Error, fill = Group)) +
+  geom_boxplot() +
+  labs(title = "Error by Time Point with Calibration Measures", x = "Time Point", y = "Error") +
+  theme_minimal()
+
+# Add line plot for calibration measures, ensuring Time is correctly mapped
+p + geom_line(data = calib_data, aes(x = factor(TimePoint), y = Value, color = Measure, group = Measure), size = 1) +
+  scale_color_manual(values = c("orange", "purple", "blue", "brown")) +
+  guides(fill = guide_legend(title = "Error Group"), color = guide_legend(title = "Calibration Measure"))
+
+```
+Modify so that the time points are the real times at evaluation. 
+
+### OE
+
+"How close is the estimated risk to the overall observed outcome proportion? Ratio of overall observed outcome proportion to average estimated risk."
+
+A simple method to summarise overall calibration (or calibration in the large) by a particular time point is to use a ratio of observed and expected outcomes (O/E ratio). An O/E ratio of 1 indicates perfect calibration in the large, a ratio <1 indicates that on average the model predictions are too high, and a ratio >1 indicates that on average the model predictions are too low. In the presence of competing events, the O/E ratio can be calculated as the ratio of the observed outcome proportion by the prediction horizon (estimated by the Aalen-Johansen estimator) and the average risk estimated by the prediction model under evaluation
+
+However, there is a problem using the code in the paper. Warning happens with competing risks and invalid status is set to NA. Maybe it needs to be modified to take competing risks.
+
+```{r eval=FALSE, message=TRUE, warning=TRUE}
+## Observed/Expected ratio --------------------------------------------
+# First calculate Aalen-Johansen estimate (as 'observed')
+obj <- summary(survfit(Surv(time, status) ~ 1, data = vdata), times = horizon)
+
+aj <- list(
+  "obs" = obj$pstate[, primary_event + 1],
+  "se" = obj$std.err[, primary_event + 1])
+
+# Calculate O/E
+OE <- aj$obs / mean(pred)
+
+# For the confidence interval we use method proposed in Debray et al. (2017) doi:10.1136/bmj.i6460
+k <- 2
+alpha <- 0.05
+OE_summary <- cbind(
+  "OE" = OE,
+  "Lower .95" = exp(log(OE) - qnorm(1 - alpha / 2) * aj$se / aj$obs),
+  "Upper .95" = exp(log(OE) + qnorm(1 - alpha / 2) * aj$se / aj$obs)
+)
+
+OE_summary <- round(OE_summary, k)
+```
+
+Maybe in the paper, they are treating competing risk as censor?
+
+```{r}
+# Recode status: competing risks (2) treated as censored
+vdata$status2 <- ifelse(vdata$status == 2, 0, vdata$status)
+# First calculate Aalen-Johansen estimate (as 'observed')
+obj <- summary(survfit(Surv(time, status2) ~ 1, data = vdata), times = horizon)
+
+aj <- list(
+  "obs" = 1 - obj$surv,
+  "se" = obj$std.err)
+
+# Calculate O/E
+OE <- aj$obs / mean(pred)
+
+# For the confidence interval we use method proposed in Debray et al. (2017) doi:10.1136/bmj.i6460
+k <- 2
+alpha <- 0.05
+OE_summary <- cbind(
+  "OE" = OE,
+  "Lower .95" = exp(log(OE) - qnorm(1 - alpha / 2) * aj$se / aj$obs),
+  "Upper .95" = exp(log(OE) + qnorm(1 - alpha / 2) * aj$se / aj$obs)
+)
+
+OE_summary <- round(OE_summary, k)
+print(OE_summary)
+```
+
+It is a bit higher than expected from the paper result (0.80). 
+
+It might be more correct to use Aalen Johansen stimator with prodlim or cmprks.
+
+```{r}
+# Aalen-Johansen estimator
+obj <- prodlim::prodlim(Hist(time, status) ~ 1, data = vdata, reverse = FALSE)
+
+# Predict CIF for new data
+cif_tau <- stats::predict(obj, 
+                    times = 5, 
+                    newdata = vdata, 
+                    cause = primary_event, 
+                    type = "cuminc") # Set to "surv" if survival
+
+# Calculate O/E
+OE <- cif_tau / mean(pred)
+
+print(OE)
+
+# Need boostrap for CI.
+
+print(OE)
+
+```
+
+
+```{r}
+### Alternatively cmprsk package.
+# Compute CIF
+fit <- cmprsk::cuminc(ftime = vdata$time, fstatus = vdata$status, cencode = 0)
+
+# Extract CIF and SE for the primary event
+time_points <- fit[["1 1"]]$time
+
+# Find the index of the time point closest to time of interest
+index <- which.min(abs(time_points - horizon))
+
+
+cif_at_tau <- fit[["1 1"]]$est[index]
+se_at_tau <- fit[["1 1"]]$var[index]
+
+print(cif_at_tau)
+print(se_at_tau)
+
+# Calculate O/E
+OE <- cif_at_tau / mean(pred)
+
+# For the confidence interval we use method proposed in Debray et al. (2017) doi:10.1136/bmj.i6460
+k <- 2
+alpha <- 0.05
+OE_summary <- cbind(
+  "OE" = OE,
+  "Lower .95" = exp(log(OE) - qnorm(1 - alpha / 2) * se_at_tau / cif_at_tau),
+  "Upper .95" = exp(log(OE) + qnorm(1 - alpha / 2) * se_at_tau / cif_at_tau)
+)
+
+OE_summary <- round(OE_summary, k)
+print(OE_summary)
+```
+
+
+We get the result of the paper
+
+### Calibration intercept and slope
+
+Another approach to numerically summarise the calibration plot of predictions by a particular time point is by calculating the calibration intercept and calibration slope. For competing risks data, these can be estimated using pseudo-observations, similar to those proposed for single risk survival
+
+If on average the risk estimates equal the observed outcome proportions, the calibration intercept will be zero. The calibration slope equals 1 if the strength of the predictors matches the observed strength in the validation set. The calibration intercept and slope can potentially be used for recalibration of existing models to fit better in new population
+
+A Wald test is performed to jointly test the null hypothesis that the intercept = 0 and the slope = 1 (which would indicate perfect calibration)
+
+```{r}
+# We use the pseudobservation that have not been smoothen. 
+# Calculated with prodlim or pseudoci
+pseu <- data.frame(cbind(pseudo, pred))
+names(pseu) <- c("pseudovalue", "risk")
+pseu <- pseu[order(pseu$risk), ]
+# Add an index column
+pseu$ID <- 1:nrow(pseu)
+
+pseu$cll_pred <- log(-log(1 - pseu$risk)) # add the cloglog risk ests
+
+# Fit model for calibration intercept
+# The offset ensures the model is estimating the intercept
+fit_cal_int <- geepack::geese(
+  pseudovalue ~ offset(cll_pred),
+  data = pseu,
+  id = ID,
+  scale.fix = TRUE,
+  family = gaussian,
+  mean.link = "cloglog",
+  corstr = "independence",
+  jack = TRUE
+)
+
+# Fit model for calibration slope
+fit_cal_slope <- geepack::geese(
+  pseudovalue ~ offset(cll_pred) + cll_pred,
+  data = pseu,
+  id = ID,
+  scale.fix = TRUE,
+  family = gaussian,
+  mean.link = "cloglog",
+  corstr = "independence",
+  jack = TRUE
+)
+
+# Perform joint test on intercept and slope
+betas <- fit_cal_slope$beta
+vcov_mat <- fit_cal_slope$vbeta # Variance-covariance matrix
+se <- sqrt(diag(vcov_mat))  # Standard errors for intercept and slope
+# Critical value for 95% CI from the normal distribution
+z_value <- 1.96  # 95% confidence level
+# Calculate the confidence intervals
+ci_lower <- betas - z_value * se  # Lower bounds
+ci_upper <- betas + z_value * se  # Upper bounds
+
+wald <- drop(betas %*% solve(vcov_mat) %*% betas)
+pchisq(wald, df = 2, lower.tail = FALSE)
+
+```
+
+```{r}
+# Intercept
+fit_cal_int 
+```
+The intercept from represents the overall calibration intercept (calibration-in-the-large). It measures if predicted CIFs are too high or too low on average without accounting for how well the model performs at different levels of risk. In this case it is -0.15, slight overestimation. If we use the complementary log-log link function, we can adjust the predicted risk - For an estimated risk of 30% :
+
+Adjusted risk = 1 - 0.7^{exp(-0.15)}
+
+The result is actual risk expected is 26%, showing that the initial predicted is higher, therefore, overestimated. 
+
+For the slope:
+
+```{r}
+# Slope
+fit_cal_slope
+```
+
+```{r}
+betas
+```
+
+The slope is quite far from 1, which indicates that the model is poorly calibrated across the range of predicted probabilities. A slope of 0.2175 suggests that the predictions are compressed toward the middle of the probability range (lower risk predictions are overestimated, and higher risk predictions are underestimated).In orther words: People at high risk are predicted to have lower risk than they should, and people at low risk are predicted to have higher risk than they should.
+
+Essentially, the predicted probabilities do not vary as much as the observed risks across the population. and the model needs recalibration to improve the predictions' spread across risk levels. 
+
+Result when using RiskRegression Score function:
+```{r}
+# Models ----------
+fit_csh <- CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+
+# useful objects
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted risk estimation
+pred <- predictRisk(fit_csh,
+  cause = primary_event,
+  times = horizon,
+  newdata = vdata
+)
+
+
+# Calibration plot (pseudo-obs approach) ----------------------------------
+# First compute riskRegression::Score()
+score_vdata <- Score(
+  list("csh_validation" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = horizon,
+  #  metrics = c("auc", "brier"),
+  summary = c("ipa"),
+  cause = primary_event,
+  plots = "calibration"
+)
+
+
+## Calibration intercept and slope --------------------------------------
+# Use pseudo-observations calculated by Score() (can alternatively use pseudo::pseudoci)
+pseudos <- data.frame(score_vdata$Calibration$plotframe)
+
+# Note:
+# - 'pseudos' is the data.frame with ACTUAL pseudo-observations, not the smoothed ones
+# - Column ID is not the id in vdata; it is just a number assigned to each row of
+# the original validation data sorted by time and event indicator
+pseudos$cll_pred <- log(-log(1 - pseudos$risk)) # add the cloglog risk ests
+
+# Fit model for calibration intercept
+fit_cal_int <- geese(
+  pseudovalue ~ offset(cll_pred),
+  data = pseudos,
+  id = ID,
+  scale.fix = TRUE,
+  family = gaussian,
+  mean.link = "cloglog",
+  corstr = "independence",
+  jack = TRUE
+)
+
+# Fit model for calibration slope
+fit_cal_slope <- geese(
+  pseudovalue ~ offset(cll_pred) + cll_pred,
+  data = pseudos,
+  id = ID,
+  scale.fix = TRUE,
+  family = gaussian,
+  mean.link = "cloglog",
+  corstr = "independence",
+  jack = TRUE
+)
+
+# Perform joint test on intercept and slope
+betas <- fit_cal_slope$beta
+vcov_mat <- fit_cal_slope$vbeta
+wald <- drop(betas %*% solve(vcov_mat) %*% betas)
+pchisq(wald, df = 2, lower.tail = FALSE)
+```
+
+```{r}
+fit_cal_int
+```
+
+```{r}
+fit_cal_slope
+```
+
+We get same results from the code, although in the paper: 
+
+The calibration intercept was estimated at -0.15 [95% CI -0.36 to 0.05] also pointing towards slight overestimation (though not statistically significant). This number for example means that for an estimated risk of 30%, the expected actual risk is 1-0.7^(exp(-0.15))=26%. **The calibration slope was 1.22 [95% CI 0.84 to 1.60]** (?), which would indicate too homogeneous predictions but the wide confidence interval precludes any firm conclusions from it. The p-value for the joint test on calibration intercept and slope was 0.09.
+
+

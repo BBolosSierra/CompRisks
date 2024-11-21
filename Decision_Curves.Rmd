@@ -1,0 +1,690 @@
+# Metrics for survival analysis. 
+
+The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. 
+
+
+```{r}
+source("CompRisksMetrics/ClinicalUtility.R")
+
+# Import data ------------------
+rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
+vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+```
+
+```{r}
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+```{r}
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(ggplot2)
+library(geepack)
+library(dplyr)
+```
+
+
+Each model will have a different summary and it is relevant to identify key elements that are needed to calculate the metrics. 
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+## Decision Curve Analysis
+
+Net benefit for competing risks data
+
+The benefit of a prediction model is defined as the proportion of patients who are correctly classified as high risk. 
+In the presence of competing events, this proportion can be calculated as the cumulative incidence of recurrence among patients with estimated risk ≥20%, multiplied by the proportion of all patients with risk ≥20%.
+
+The harm from using the model is defined as the proportion of patients who are incorrectly classified as high risk. With competing events, this proportion is calculated as: 1−cumulative incidence among patients with estimated risk exceeding 20% multiplied by the probability of exceeding that threshold. 
+
+Net benefit is a measure that combines both the true positives and the false positives to show the benefit of making treatment decisions based on the model's predictions. It balances the harm caused by false positives with the benefit of true positives.
+
+
+For each threshold probability (the probability above which a patient would receive treatment or an intervention), the net benefit compares:
+The benefit of treating patients who will experience recurrence (true positives).
+The cost of treating patients who will not experience recurrence (false positives).
+
+The threshold probability reflects the risk level at which a clinician would decide to intervene (e.g., offer adjuvant therapy after surgery). A higher threshold means the clinician would only intervene in patients who have a higher predicted risk of recurrence.
+
+Threshold probability is the x-axis in the decision curve plot. Represents the threshold risk of recurrence at which a clinician would decide to offer treatment. For example, a threshold of 0.2 (20%) means the clinician would intervene if the predicted risk of recurrence is greater than 20%.
+Another way of defining the threshold probability could be the risk level at which you would recommend treatment or intervention (e.g., post-surgery treatment for patients with a predicted recurrence risk above 20%)
+
+Low threshold probability: Implies a more aggressive treatment strategy—patients with relatively low predicted risk of the event (e.g., cancer recurrence) would still receive treatment.
+High threshold probability: Implies a more conservative treatment strategy—only patients with a high predicted risk of the event would be treated.
+
+Net benefit can be calculated for a range of reasonable thresholds, resulting in a decision curve.
+The higher the net benefit, the better the model is at guiding clinical decisions.
+
+Those models that have high net benefit at lower threshold probabilitites (lower that 0.2), means, that the model is more effective when making decisons for patients with lower predicted risks.
+
+Lines in the Decision Curve:
+
+1) "Treat all" line: Represents the net benefit of treating all patients, regardless of their predicted risk. This assumes all patients have cancer recurrence, so every patient receives treatment.
+2) "Treat none" line: Represents the net benefit of not treating anyone, regardless of predicted risk. This assumes no patients have recurrence.
+3) Model curve: This shows the net benefit when using the predictive model for decision-making. If this curve is above the "treat all" and "treat none" lines for certain threshold probabilities, it suggests that the model has clinical utility and performs better than indiscriminate treatment or no treatment.
+
+
+Why this can be useful in our case... we can evaluate the benefit of having transcriptomics for decision making in several models? Maybe transctiptomics and subtyping might only be giving benefit for patients under high risk cases or certain stages...
+
+Under the same covariates, the model that gives higher net benefit might be more suitable for clinical decision making. Particularly it would be a model that has the best performance at a particular threshold range. 
+
+Interpretation:
+
+1) If the model's curve is above the "treat all" and "treat none" lines for a range of threshold probabilities, this indicates that the model is clinically useful. It leads to better decision-making (higher net benefit) than either treating everyone or treating no one.
+
+2) If the model's curve lies below the "treat all" or "treat none" lines, it indicates that using the model would result in worse decisions compared to treating everyone or no one. This could suggest poor model calibration, overestimation of recurrence, or failure to account properly for competing risks.
+
+3) The range of threshold probabilities where the model performs better than the "treat all" and "treat none" strategies is important. For instance, if clinicians are comfortable with treating patients who have a 20-30% predicted risk of recurrence, you want the model’s curve to be above the "treat all" and "treat none" lines in this range.
+
+4) "Treat All" line represents the net benefit of treating all patients, regardless of their risk prediction. If this line drops to 0 at a specific threshold, such as a 0.1 threshold, it indicates that, at that threshold, treating all patients provides no net benefit compared to not treating anyone. In other words, at a 10% threshold, treating everyone provides no net benefit because the harms of overtreatment outweigh the benefits of correctly treating patients who experience the event.
+
+Ex: 
+If the model predicts recurrence in patients with post-surgery cancer based on various risk factors (age, tumor stage, etc.), and the decision curve shows a net benefit curve higher than the "treat all" line between threshold probabilities of 0.15 and 0.35, this means that using the model to decide on interventions (e.g., follow-up treatments) is beneficial for patients with a 15-35% risk of recurrence. The model allows clinicians to intervene where necessary while avoiding unnecessary treatments for low-risk patients.
+
+What is the best time to predict or evaluate, maybe 3 y for GRI? right after diagnoses? 
+
+In the paper it is calculated with the following function:
+
+```{r}
+stdca <- function(data,
+                  outcome,
+                  ttoutcome,
+                  timepoint,
+                  predictors,
+                  xstart = 0.01,
+                  xstop = 0.99,
+                  xby = 0.01,
+                  ymin = -0.05,
+                  probability = NULL,
+                  harm = NULL,
+                  graph = TRUE,
+                  intervention = FALSE,
+                  interventionper = 100,
+                  smooth = FALSE,
+                  loess.span = 0.10,
+                  cmprsk = FALSE) {
+  
+  # ONLY KEEPING COMPLETE CASES
+  data <- data[complete.cases(data[c(outcome, ttoutcome, predictors)]), c(outcome, ttoutcome, predictors)]
+  
+  # outcome MUST BE CODED AS 0 AND 1
+  if ((length(data[!(data[outcome] == 0 | data[outcome] == 1), outcome]) > 0) & cmprsk == FALSE) {
+    stop("outcome must be coded as 0 and 1")
+  }
+  
+  # data MUST BE A DATA FRAME
+  if (class(data) != "data.frame") {
+    stop("Input data must be class data.frame")
+  }
+  
+  # xstart IS BETWEEN 0 AND 1
+  if (xstart < 0 | xstart > 1) {
+    stop("xstart must lie between 0 and 1")
+  }
+  
+  # xstop IS BETWEEN 0 AND 1
+  if (xstop < 0 | xstop > 1) {
+    stop("xstop must lie between 0 and 1")
+  }
+  
+  # xby IS BETWEEN 0 AND 1
+  if (xby <= 0 | xby >= 1) {
+    stop("xby must lie between 0 and 1")
+  }
+  
+  # xstart IS BEFORE xstop
+  if (xstart >= xstop) {
+    stop("xstop must be larger than xstart")
+  }
+  
+  # STORING THE NUMBER OF PREDICTORS SPECIFIED
+  pred.n <- length(predictors)
+  
+  # IF probability SPECIFIED ENSURING THAT EACH PREDICTOR IS INDICATED AS A T OR F
+  if (length(probability) > 0 & pred.n != length(probability)) {
+    stop("Number of probabilities specified must be the same as the number of predictors being checked.")
+  }
+  
+  
+  # IF harm SPECIFIED ENSURING THAT EACH PREDICTOR HAS A SPECIFIED HARM
+  if (length(harm) > 0 & pred.n != length(harm)) {
+    stop("Number of harms specified must be the same as the number of predictors being checked.")
+  }
+  
+  # INITIALIZING DEFAULT VALUES FOR PROBABILITES AND HARMS IF NOT SPECIFIED
+  if (length(harm) == 0) {
+    harm <- rep(0, pred.n)
+  }
+  if (length(probability) == 0) {
+    probability <- rep(TRUE, pred.n)
+  }
+  
+  # THE PREDICTOR NAMES CANNOT BE EQUAL TO all OR none.
+  if (length(predictors[predictors == "all" | predictors == "none"])) {
+    stop("Prediction names cannot be equal to all or none.")
+  }
+  
+  # CHECKING THAT EACH probability ELEMENT IS EQUAL TO T OR F,
+  # AND CHECKING THAT PROBABILITIES ARE BETWEEN 0 and 1
+  # IF NOT A PROB THEN CONVERTING WITH A COX REGRESSION
+  for (m in 1:pred.n) {
+    if (probability[m] != TRUE & probability[m] != FALSE) {
+      stop("Each element of probability vector must be TRUE or FALSE")
+    }
+    if (probability[m] == TRUE & (max(data[predictors[m]]) > 1 | min(data[predictors[m]]) < 0)) {
+      stop(paste(predictors[m], "must be between 0 and 1 OR sepcified as a non-probability in the probability option", sep = " "))
+    }
+    if (probability[m] == FALSE) {
+      model <- NULL
+      pred <- NULL
+      model <- survival::coxph(Surv(data.matrix(data[ttoutcome]), data.matrix(data[outcome])) ~ data.matrix(data[predictors[m]]))
+      surv.data <- data.frame(0)
+      pred <- data.frame(1 - c(summary(survival::survfit(model, newdata = surv.data), time = timepoint, extend = TRUE)$surv))
+      names(pred) <- predictors[m]
+      data <- cbind(data[names(data) != predictors[m]], pred)
+      print(paste(predictors[m], "converted to a probability with Cox regression. Due to linearity and proportional hazards assumption, miscalibration may occur.", sep = " "))
+    }
+  }
+  
+  #########  CALCULATING NET BENEFIT   #########
+  N <- dim(data)[1]
+  
+  # getting the probability of the event for all subjects
+  # this is used for the net benefit associated with treating all patients
+  if (cmprsk == FALSE) {
+    km.cuminc <- survival::survfit(Surv(data.matrix(data[ttoutcome]), data.matrix(data[outcome])) ~ 1)
+    pd <- 1 - summary(km.cuminc, times = timepoint, extend = TRUE)$surv
+  } else {
+    cr.cuminc <- cmprsk::cuminc(data[[ttoutcome]], data[[outcome]])
+    pd <- cmprsk::timepoints(cr.cuminc, times = timepoint)$est[1]
+  }
+  
+  # creating dataset that is one line per threshold for the treat all and treat none strategies;
+  # CREATING DATAFRAME THAT IS ONE LINE PER THRESHOLD PER all AND none STRATEGY
+  nb <- data.frame(seq(from = xstart, to = xstop, by = xby))
+  names(nb) <- "threshold"
+  interv <- nb
+  error <- NULL
+  
+  nb["all"] <- pd - (1 - pd) * nb$threshold / (1 - nb$threshold)
+  nb["none"] <- 0
+  
+  # CYCLING THROUGH EACH PREDICTOR AND CALCULATING NET BENEFIT
+  for (m in 1:pred.n) {
+    nb[predictors[m]] <- NA
+    
+    for (t in 1:length(nb$threshold)) {
+      # calculating number of true and false postives;
+      px <- sum(data[predictors[m]] > nb$threshold[t]) / N
+      if (px == 0) {
+        error <- rbind(error, paste(predictors[m], ": No observations with risk greater than ", nb$threshold[t] * 100, "%", sep = ""))
+        break
+      } else {
+        # calculate risk using Kaplan Meier
+        if (cmprsk == FALSE) {
+          km.cuminc <- survival::survfit(Surv(data.matrix(data[data[predictors[m]] > nb$threshold[t], ttoutcome]), data.matrix(data[data[predictors[m]] > nb$threshold[t], outcome])) ~ 1)
+          pdgivenx <- (1 - summary(km.cuminc, times = timepoint, extend = TRUE)$surv)
+          if (length(pdgivenx) == 0) {
+            error <- rbind(error, paste(predictors[m], ": No observations with risk greater than ", nb$threshold[t] * 100, "% that have followup through the timepoint selected", sep = ""))
+            break
+          }
+          # calculate risk using competing risk
+        } else {
+          cr.cuminc <- cmprsk::cuminc(data[[ttoutcome]][data[[predictors[m]]] > nb$threshold[t]], data[[outcome]][data[[predictors[m]]] > nb$threshold[t]])
+          pdgivenx <- cmprsk::timepoints(cr.cuminc, times = timepoint)$est[1]
+          if (is.na(pdgivenx)) {
+            error <- rbind(error, paste(predictors[m], ": No observations with risk greater than ", nb$threshold[t] * 100, "% that have followup through the timepoint selected", sep = ""))
+            break
+          }
+        }
+        # calculating NB based on calculated risk
+        nb[t, predictors[m]] <- pdgivenx * px - (1 - pdgivenx) * px * nb$threshold[t] / (1 - nb$threshold[t]) - harm[m]
+      }
+    }
+    interv[predictors[m]] <- (nb[predictors[m]] - nb["all"]) * interventionper / (interv$threshold / (1 - interv$threshold))
+  }
+  if (length(error) > 0) {
+    print(paste(error, ", and therefore net benefit not calculable in this range.", sep = ""))
+  }
+  
+  # CYCLING THROUGH EACH PREDICTOR AND SMOOTH NET BENEFIT AND INTERVENTIONS AVOIDED
+  for (m in 1:pred.n) {
+    if (smooth == TRUE) {
+      lws <- stats::loess(data.matrix(nb[!is.na(nb[[predictors[m]]]), predictors[m]]) ~ data.matrix(nb[!is.na(nb[[predictors[m]]]), "threshold"]), span = loess.span)
+      nb[!is.na(nb[[predictors[m]]]), paste(predictors[m], "_sm", sep = "")] <- lws$fitted
+      
+      lws <- stats::loess(data.matrix(interv[!is.na(nb[[predictors[m]]]), predictors[m]]) ~ data.matrix(interv[!is.na(nb[[predictors[m]]]), "threshold"]), span = loess.span)
+      interv[!is.na(nb[[predictors[m]]]), paste(predictors[m], "_sm", sep = "")] <- lws$fitted
+    }
+  }
+  
+  
+  # PLOTTING GRAPH IF REQUESTED
+  if (graph == TRUE) {
+    
+    # PLOTTING INTERVENTIONS AVOIDED IF REQUESTED
+    if (intervention == TRUE) {
+      # initialize the legend label, color, and width using the standard specs of the none and all lines
+      legendlabel <- NULL
+      legendcolor <- NULL
+      legendwidth <- NULL
+      legendpattern <- NULL
+      
+      # getting maximum number of avoided interventions
+      ymax <- max(interv[predictors], na.rm = TRUE)
+      
+      # INITIALIZING EMPTY PLOT WITH LABELS
+      plot(
+        x = nb$threshold, y = nb$all, type = "n", xlim = c(xstart, xstop), ylim = c(ymin, ymax),
+        xlab = "Threshold probability",
+        ylab = paste("Net reduction in interventions per", interventionper, "patients")
+      )
+      
+      # PLOTTING INTERVENTIONS AVOIDED FOR EACH PREDICTOR
+      for (m in 1:pred.n) {
+        if (smooth == TRUE) {
+          lines(interv$threshold, data.matrix(interv[paste(predictors[m], "_sm", sep = "")]), col = m, lty = 2)
+        } else {
+          lines(interv$threshold, data.matrix(interv[predictors[m]]), col = m, lty = 2)
+        }
+        
+        # adding each model to the legend
+        legendlabel <- c(legendlabel, predictors[m])
+        legendcolor <- c(legendcolor, m)
+        legendwidth <- c(legendwidth, 1)
+        legendpattern <- c(legendpattern, 2)
+      }
+    } else {
+      # PLOTTING NET BENEFIT IF REQUESTED
+      # initialize the legend label, color, and width using the standard specs of the none and all lines
+      legendlabel <- c("None", "All")
+      legendcolor <- c(17, 8)
+      legendwidth <- c(2, 2)
+      legendpattern <- c(1, 1)
+      
+      # getting maximum net benefit
+      ymax <- max(nb[names(nb) != "threshold"], na.rm = TRUE)
+      
+      # inializing new benfit plot with treat all option
+      plot(x = nb$threshold, y = nb$all, type = "l", col = 8, lwd = 2, xlim = c(xstart, xstop), ylim = c(ymin, ymax), xlab = "Threshold probability", ylab = "Net benefit")
+      # adding treat none option
+      lines(x = nb$threshold, y = nb$none, lwd = 2)
+      # PLOTTING net benefit FOR EACH PREDICTOR
+      for (m in 1:pred.n) {
+        if (smooth == TRUE) {
+          lines(nb$threshold, data.matrix(nb[paste(predictors[m], "_sm", sep = "")]), col = m, lty = 2)
+        } else {
+          lines(nb$threshold, data.matrix(nb[predictors[m]]), col = m, lty = 2)
+        }
+        # adding each model to the legend
+        legendlabel <- c(legendlabel, predictors[m])
+        legendcolor <- c(legendcolor, m)
+        legendwidth <- c(legendwidth, 1)
+        legendpattern <- c(legendpattern, 2)
+      }
+    }
+    # then add the legend
+    legend("topright", legendlabel, cex = 0.8, col = legendcolor, lwd = legendwidth, lty = legendpattern)
+  }
+  
+  # RETURNING RESULTS
+  results <- list()
+  results$N <- N
+  results$predictors <- data.frame(cbind(predictors, harm, probability))
+  names(results$predictors) <- c("predictor", "harm.applied", "probability")
+  results$interventions.avoided.per <- interventionper
+  results$net.benefit <- nb
+  results$interventions.avoided <- interv
+  return(results)
+}
+```
+
+
+```{r}
+# Models ----------
+
+fit_csh <- riskRegression::CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+# useful objects
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+horizon <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted risk estimation
+pred <- riskRegression::predictRisk(fit_csh,
+  cause = primary_event,
+  times = horizon,
+  newdata = vdata
+)
+
+
+vdata$pred <- pred
+
+
+# Run decision curve analysis
+# Development data
+# Model without PGR
+dca_vdata <- stdca(
+  data = vdata,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = horizon, 
+  predictors = "pred",
+  xstop = 0.45,
+  ymin = -0.01,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+
+```{r}
+
+# Decision curves plot
+oldpar <- par(
+  xaxs = "i",
+  yaxs = "i",
+  las = 1,
+  mar = c(6.1, 5.8, 4.1, 2.1),
+  mgp = c(4.25, 1, 0)
+)
+plot(dca_vdata$net.benefit$threshold,
+  dca_vdata$net.benefit$pred,
+  type = "l",
+  lwd = 2,
+  lty = 1,
+  xlab = "",
+  ylab = "Net Benefit",
+  xlim = c(0, 0.5),
+  ylim = c(-0.10, 0.10),
+  bty = "n",
+  xaxt = "n"
+)
+lines(dca_vdata$net.benefit$threshold,
+  dca_vdata$net.benefit$none,
+  type = "l",
+  lwd = 2,
+  lty = 4
+)
+lines(dca_vdata$net.benefit$threshold,
+  dca_vdata$net.benefit$all,
+  type = "l",
+  lwd = 2,
+  col = "darkgray"
+)
+legend("topright",
+  c("Treat all", "Treat none", "Prediction model"),
+  lwd = c(2, 2, 2),
+  lty = c(1, 2, 1),
+  col = c("darkgray", "black", "black"),
+  bty = "n"
+)
+axis(1,
+  at = c(0, 0.1, 0.2, 0.3, 0.4, 0.5)
+)
+axis(1,
+  pos = -0.145,
+  at = c(0.1, 0.2, 0.3, 0.4, 0.5),
+  labels = c("1:9", "1:4", "3:7", "2:3", "1:1")
+)
+mtext("Threshold probability", 1, line = 2)
+mtext("Harm to benefit ratio", 1, line = 5)
+title("Validation data")
+par(oldpar)
+```
+
+
+## To undestand little by little what is going on in the function
+
+We replicate here what the function does:
+
+```{r}
+# Default parameters: 
+xstart = 0.01
+xstop = 0.99
+xby = 0.01
+
+# Number of patients
+N <- dim(vdata)[1]
+
+# Aalen Johansen
+cr.cuminc <- cmprsk::cuminc(vdata$time, vdata$status)
+# estimated CIF at specific timepoint for event of interest
+pd <- cmprsk::timepoints(cr.cuminc, 
+                         times = horizon)$est[primary_event] 
+
+# Create dataframe per threshold
+nb <- data.frame(seq(from = xstart, to = xstop, by = xby))
+names(nb) <- "threshold"
+interv <- nb
+error <- NULL
+
+nb["all"] <- pd - (1 - pd) * nb$threshold / (1 - nb$threshold)
+nb["none"] <- 0
+nb["pred"] <- NA
+#pred.n <- 1
+harm <- rep(0, 1)
+
+predictors <- "pred"
+
+vdata <- as.data.frame(vdata)
+
+for (t in 1:length(nb$threshold)) {
+  # calculating number of true and false postives;
+  px <- sum(vdata[["pred"]] > nb$threshold[t]) / N
+  print(px)
+  
+  if (px == 0) {
+    
+    error <- rbind(error, paste( ": No observations with risk greater than ", nb$threshold[t] * 100, "%", sep = ""))
+    break
+    
+  } else {
+    #calculate risk using competing risk
+    cr.cuminc <- cmprsk::cuminc(vdata[["time"]][vdata$pred > nb$threshold[t]], 
+                                vdata[["status"]][vdata$pred > nb$threshold[t]])
+    pdgivenx <- cmprsk::timepoints(cr.cuminc, times = horizon)$est[primary_event]
+      
+    if (is.na(pdgivenx)) {
+        error <- rbind(error, paste(": No observations with risk greater than ", nb$threshold[t] * 100, "% that have followup through the timepoint selected", sep = ""))
+        break
+    }
+  }
+  
+ # calculating NB based on calculated risk
+ nb[t, "pred"] <- pdgivenx * px - (1 - pdgivenx) * px * nb$threshold[t] / (1 - nb$threshold[t]) - harm
+
+}
+# why? not sure what is this interventionper
+interventionper = 100
+
+interv[["pred"]] <- (nb["pred"] - nb["all"]) * interventionper / (interv$threshold / (1 - interv$threshold))
+
+if (length(error) > 0) {
+    print(paste(error, ", and therefore net benefit not calculable in this range.", sep = ""))
+}
+
+
+### Smothing
+loess.span = 0.10
+
+lws <- stats::loess(data.matrix(nb[!is.na(nb[["pred"]]), "pred"]) ~ data.matrix(nb[!is.na(nb[["pred"]]), "threshold"]), span = loess.span)
+
+nb[!is.na(nb[["pred"]]), paste("pred", "_sm", sep = "")] <- lws$fitted
+
+lws <- stats::loess(data.matrix(interv[!is.na(nb[["pred"]]), "pred"]) ~ data.matrix(interv[!is.na(nb[["pred"]]), "threshold"]), span = loess.span)
+
+interv[!is.na(nb[["pred"]]), paste("pred", "_sm", sep = "")] <- lws$fitted
+
+
+### Plot
+
+legendlabel <- c("None", "All")
+legendcolor <- c(17, 8)
+legendwidth <- c(2, 2)
+legendpattern <- c(1, 1)
+
+# getting maximum net benefit
+ymax <- max(nb[names(nb) != "threshold"], na.rm = TRUE)
+
+# inializing new benfit plot with treat all option
+plot(x = nb$threshold, y = nb$all, type = "l", col = 8, lwd = 2, xlim = c(xstart, xstop), ylim = c(-0.05, ymax), xlab = "Threshold probability", ylab = "Net benefit")
+# adding treat none option
+lines(x = nb$threshold, y = nb$none, lwd = 2)
+lines(nb$threshold, data.matrix(nb["pred"]), col = 1, lty = 2)
+
+lines(nb$threshold, data.matrix(nb["pred"]), col = 1, lty = 2)
+
+# adding each model to the legend
+legendlabel <- c(legendlabel, "pred")
+legendcolor <- c(legendcolor, 5)
+legendwidth <- c(legendwidth, 1)
+legendpattern <- c(legendpattern, 2)
+
+# then add the legend
+legend("topright", legendlabel, cex = 0.8, col = legendcolor, lwd = legendwidth, lty = legendpattern)
+```
+
+### For multiple times evaluation
+
+```{r}
+rm(list = ls())
+```
+
+
+
+```{r}
+source("CompRisksMetrics/ClinicalUtility.R")
+
+# Import data ------------------
+rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
+vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+```
+
+```{r}
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+
+```{r}
+# Models ----------
+
+fit_csh <- riskRegression::CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+# useful objects
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+
+# Validation data
+# Predicted probability calculation
+preds_ts <- predictRisk(fit_csh,
+  cause = primary_event,
+  newdata = vdata,
+  times = c(1,3,6,9)
+)
+
+preds_ts <- as.data.frame(preds_ts)
+names(preds_ts) <- c("pred_t1", "pred_t3", "pred_t6", "pred_t9")
+
+vdata <- as.data.frame(vdata)
+
+# Bind in 1 df
+df <- cbind(vdata, preds_ts)
+
+# Run decision curve analysis
+# Development data
+# Model without PGR
+dca_vdata <- stdca(
+  data = df,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = 1,
+  predictors = c("pred_t1"),
+  xstop = 0.45,
+  ymin = -0.01,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+
+```{r}
+dca_vdata <- stdca(
+  data = df,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = 3,
+  predictors = c("pred_t3"),
+  xstop = 0.45,
+  ymin = -0.1,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+
+```{r}
+dca_vdata <- stdca(
+  data = df,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = c(1,3), ## this would not work.. only for 1 time point.
+  predictors = c("pred_t1","pred_t3"), # this is defined for different models
+  xstop = 0.45,
+  ymin = -0.1,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+
+It is designed for the predictions of different models evaluated at a specific time point. 
+However.. if we wished to plot the predictions of 1 single model at a different times, it breaks... as shown before. If it would work as wished, the net benefit curves would be as when plotted independently prior to the last plot. 
+
+
+If a horizon with several points is given, only the first time is actually used in the code. 
+
+```{r}
+
+dca_vdata <- stdca(
+  data = df,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = c(1,3,9), 
+  predictors = c("pred_t1"), # this is defined for different models
+  xstop = 0.45,
+  ymin = -0.01,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+
+
+Formulas:
+
+$$ NB = \frac{TP - FPxf}{N}$$
+
+
+$$f = \frac{threshold}{1-threshold}$$
+TP - true positive - number of patients that have a high risk of recurrence and is true. 
+
+FN - false positive - number of patients that 
+
+#### Next: Modify function so it can be used at different time points (or generate some numerical measures?)
+
+#### Expand the explanation, and match inputs with the other functions.
+
+
