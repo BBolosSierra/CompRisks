@@ -22,6 +22,7 @@ library(geepack)
 library(dplyr)
 library(tidyr)
 library(pec)
+library(rsample)
 ```
 
 Needed libraries for custom functions:
@@ -30,3 +31,7 @@ Needed libraries for custom functions:
 library(prodlim)
 library(ggplot2)
 ```
+
+Not tested yet for single risk cases. 
+
+Next steps will be confidence intervals computation (bootstrap and crossvalidation), options for ties in concordance index, maybe allow for informative censoring (with censoring probabilities being computed with covariates and not just Aalen Johansen)
