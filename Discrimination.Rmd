@@ -20,16 +20,53 @@ library(dplyr)
 library(rsample)
 ```
 
+### Download data 
 
-We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+Github: https://github.com/survival-lumc/ValidationCompRisks/tree/main/Data
 
-https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+Paper: doi https://doi.org/10.1136/bmj-2021-069249
+
+"The dataset is part of FOCUS cohort (van Geloven N, Swanson SA, Ramspek CL, et al. 2020). In this retrospective cohort, all consecutive patients aged 65 years or older with breast cancer diagnosed in the South-West region of the Netherlands in the years 1997-2004 were included. The registry contains information on patient-characteristics including tumor characteristics, treatment and disease recurrence. 
+Follow-up data on patient survival (maximal 5 years) was obtained by linkage with the municipal population registries. We applied the following inclusion criteria (same inclusion criteria that were used in the validation cohort): patients with primary breast cancer who received primary breast surgery, and received no previous neoadjuvant treatment. We used a random subset of 1000 patients to allow Open Access data sharing. Out of these 1000 patients in the development set, 135 developed breast cancer recurrence and 204 had a non-recurrence death within the five years follow up (cumulative incidence curve in Supplementary Figure 1).
+Except for the higher age inclusion criterion in the validation cohort, patients were rather similar on the listed characteristics in the development and validation cohorts," called rdata and vdata in Github respectively. 
+
+```{r}
+# Create a directory to store downloaded data
+if (!dir.exists("LumcData")) {
+  dir.create("LumcData")
+}
+
+# Fix paths
+file_urls <- c(
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/rdata.rds",
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/vdata.rds"
+)
+
+# Download files
+for (url in file_urls) {
+  file_name <- basename(url) # Extract the file name from the URL
+  if (!file.exists("LumcData/rdata.rds") || !file.exists("LumcData/vdata.rds")) {
+    message("Downloading data")
+    download.file(url, destfile = file.path("LumcData", file_name), method = "libcurl")
+  } else {
+    message("Data is already downloaded")
+  }
+}
+
+# Check if the files are downloaded
+list.files("LumcData")
+
+
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249 and https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
 
 
 ```{r}
 # Import data ------------------
-rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
-vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+rdata <- readRDS("LumcData/rdata.rds")
+vdata <- readRDS("LumcData/vdata.rds")
 
 rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
 vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
@@ -153,29 +190,6 @@ The c index ranges from 0.5 (no discriminating ability) to 1.0 (perfect ability 
 
 Time-dependent Concordance Index (C(t)) for competing risks and focuses on comparing the relative ordering of risks assigned by the model for individuals experiencing the event of interest at or before a specific time tau.
 
-
-```{r}
-C_rdata <- pec::cindex(
-  object = fit_csh,
-  formula = Hist(time, status_num) ~ 1,
-  cause = primary_event,
-  eval.times = horizon,
-  data = rdata
-)$AppCindex$CauseSpecificCox
-
-# Validation set
-C_vdata <- pec::cindex(
-  object = fit_csh,
-  formula = Hist(time, status_num) ~ 1,
-  cause = primary_event,
-  eval.times = horizon,
-  data = vdata
-)$AppCindex$CauseSpecificCox
-
-print(C_rdata)
-print(C_vdata)
-```
-
 ### Custom function 
 
 A and B account for the number of risk order pairs.
@@ -192,53 +206,7 @@ $$C_k(\tau) = \frac{\sum_{i=1}^N \sum_{j=1}^N (A_{ij} + B_{ij}) \cdot Q_{ij} \cd
 
 
 ```{r}
-CIndexCRisks <- function(predictions, 
-                                      time,
-                                      cens.code, 
-                                      status, 
-                                      cause, 
-                                      tau,
-                                      method=c("survival","cifs")){
-  
-  method = match.arg(method)
-  
-  censor.status <- ifelse(status == cens.code, 0, 1)
-  
-  if( method=="survival" ){ predictions=1-predictions; }
-  
-  n = length(predictions)
-  A = matrix(0, nrow=n, ncol=n)
-  B = matrix(0, nrow=n, ncol=n)
-  Q = matrix(0, nrow=n, ncol=n) 
-  N_t = matrix(0, nrow=n, ncol=n)
-  Num_mat = matrix(0, nrow=n, ncol=n)
-  Den_mat = matrix(0, nrow=n, ncol=n)
-  
-  Num=0
-  Den=0
-  for (i in  1:n){
-    #print(n)
-    A[i,which(time[i] < time)] = 1 
-    B[i, intersect(intersect(which((time[i] >= time)),
-                             which(status!=cause)), which(censor.status==1))] = 1
-    Q[i,which(predictions[i]>predictions)]=1
-  }
-  
-  for (i in 1:n){
-    if(time[i]<=tau && status[i]==cause && censor.status[i]==1){
-      N_t[i,] = 1
-    }
-  }
-  
-  Num_mat = (A+B)*Q*N_t
-  Den_mat = (A+B)*N_t
-  
-  Num = sum(Num_mat)
-  Den = sum(Den_mat)
-  
-  return(Num/Den)
-  
-}
+source("CompRisksMetrics/ConcordanceIndex.R") 
 ```
 
 ```{r}

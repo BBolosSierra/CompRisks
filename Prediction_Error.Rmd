@@ -19,21 +19,59 @@ library(geepack)
 library(dplyr)
 ```
 
+### Download data 
 
-We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+Github: https://github.com/survival-lumc/ValidationCompRisks/tree/main/Data
 
-https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+Paper: doi https://doi.org/10.1136/bmj-2021-069249
+
+"The dataset is part of FOCUS cohort (van Geloven N, Swanson SA, Ramspek CL, et al. 2020). In this retrospective cohort, all consecutive patients aged 65 years or older with breast cancer diagnosed in the South-West region of the Netherlands in the years 1997-2004 were included. The registry contains information on patient-characteristics including tumor characteristics, treatment and disease recurrence. 
+Follow-up data on patient survival (maximal 5 years) was obtained by linkage with the municipal population registries. We applied the following inclusion criteria (same inclusion criteria that were used in the validation cohort): patients with primary breast cancer who received primary breast surgery, and received no previous neoadjuvant treatment. We used a random subset of 1000 patients to allow Open Access data sharing. Out of these 1000 patients in the development set, 135 developed breast cancer recurrence and 204 had a non-recurrence death within the five years follow up (cumulative incidence curve in Supplementary Figure 1).
+Except for the higher age inclusion criterion in the validation cohort, patients were rather similar on the listed characteristics in the development and validation cohorts," called rdata and vdata in Github respectively. 
+
+```{r}
+# Create a directory to store downloaded data
+if (!dir.exists("LumcData")) {
+  dir.create("LumcData")
+}
+
+# Fix paths
+file_urls <- c(
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/rdata.rds",
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/vdata.rds"
+)
+
+# Download files
+for (url in file_urls) {
+  file_name <- basename(url) # Extract the file name from the URL
+  if (!file.exists("LumcData/rdata.rds") || !file.exists("LumcData/vdata.rds")) {
+    message("Downloading data")
+    download.file(url, destfile = file.path("LumcData", file_name), method = "libcurl")
+  } else {
+    message("Data is already downloaded")
+  }
+}
+
+# Check if the files are downloaded
+list.files("LumcData")
+
+
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249 and https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
 
 
 ```{r}
 # Import data ------------------
-rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
-vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+rdata <- readRDS("LumcData/rdata.rds")
+vdata <- readRDS("LumcData/vdata.rds")
 
 rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
 vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
 
 ```
+
 
 ```{r}
 rdata$status <- rdata$status_num
@@ -162,27 +200,14 @@ vboot <- vboot |> mutate(
 ```
 
 
-Sine we want to move from the Score function in RiskRegression, we can have our own definition of Brier Score:
+Since we want to move from the Score function in RiskRegression, we can have our own definition of Brier Score:
 
 ```{r}
-# Easy brier 
-BrierScore <- function(predictions,
-                        time, 
-                        status, 
-                        tau, 
-                        cause){ 
-  
-  y_true = ((time <= tau) * (status == cause))
-  
-  BS = mean((predictions-y_true)^2)
-  
-  return(BS)
-  
-}
+source("CompRisksMetrics/BrierScore.R")
 ```
 
-```{r}
 
+```{r}
 # Predicted probability calculation
 pred <- predictRisk(fit_csh,
   cause = primary_event,
@@ -486,113 +511,11 @@ Note: This estimator extrapolates by maintaining a constant value equal to the l
 
 
 ```{r}
-## Also in HelperFunctions.R
-
-## Calculate the censoring probabilities
-## Using prodlim
-## Controlling for competing risks
-## No covariates in this function
-censor.prob.KM <- function(time, status, cens.code){
-  tmp <- data.frame(time=time)
-  # Sets the value in status equal to cens.code to 0, the rest to 1
-  # Controlling for competing risks in censoring status
-  tmp$censor.status <- ifelse(status == cens.code, 0, 1) # Not handled in riskRegression with cmprsks
-  time.max = ceiling(max(time))
-  # Fit prodlim, reversed non-parametric survival KM
-  # Switches the censoring status to estimate censoring distribution
-  fit = prodlim::prodlim(formula=Surv(time,censor.status)~1,
-                         data=tmp,
-                         reverse=TRUE)
-  # Predict weights at specific times
-  prob = stats::predict(fit,
-                       times=seq(0,time.max,0.1), # switch for: unique(time) ?
-                       level.chaos=1,
-                       mode="matrix",
-                       type="surv")
-  
-  # Predict weights at subject specific times
-  #ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=1)
-  
-  #out <- list(ipcw.times=ipcw.times, ipcw.subject.times=ipcw.subject.times)
-  
-  out <- cbind(seq(0,time.max,0.1), prob)
-  
-  out <- na.omit(out)
-  
-  return(out)
-}
-```
-
-
-```{r}
 censor.prob.KM(time=vdata$time, status=vdata$status, cens.code=0)
 ```
 
-
-
 ```{r}
-## Weighted BRIER-SCORE
-WeightedBrierScore <- function(predictions,
-                                       tau,
-                                       time, 
-                                       status,
-                                       cause,
-                                       cens.code){
-  # Extract the censoring probabilities
-  G <- censor.prob.KM(time=time, 
-                         status=status, 
-                         cens.code=cens.code)
-  # G[,1] Time points where censoring probabilities are estimated
-  # G[,2] Estimated censoring probabilities
-  
-  # Create a empty vector for weights
-  n     = length(predictions)
-  W     = rep(0,n)
-  
-  # Binary indicator for individuals that are still at risk
-  Y_tilde = (time > tau)
-  # Binary indicator for individuals that have experienced the event at time tau
-  Y_true  = (time <= tau) * (status == cause)
-  
-  # Calculate G1 and G2
-  # Compute IPCW
-  for( i in 1:n ){
-    
-    # Get the index of censoring time greater or equal than the individual observed times
-    indx1 = which(G[,1] >= time[i])
-    # Get the index of time points greater or equal than evaluation time
-    indx2 = which(G[,1] >= tau)
-    
-    # Calculate G1: censoring probabilities just before observed times T 
-    if( length(indx1) > 0 ){
-      G1 = G[indx1[1],2] # Takes the earliest estimated censoring probabilities 
-    } else {
-      G1 = 1
-    }
-    # Calculate G2: censoring probabilities at tau or greater
-    if( length(indx2) > 0 ){
-      G2 = G[indx2[1],2]
-    } else {
-      G2 = 1
-    }
-    
-    W[i] = Y_tilde[i]/G2 + Y_true[i]/G1        
-
-  }    
-  
-  S    = (1/n)*sum(Y_tilde)
-
-  norm        = 1/n
-  BS          = sum((Y_true - predictions)^2)*norm
-  BS_we       = sum(W*(Y_true - predictions)^2)*norm
-  
-  return(list(brier.score = BS, 
-              weighted.brier.score = BS_we, 
-              tau = tau,
-              n=n, 
-              n.risk=S*n))
-  
-}
+source("CompRisksMetrics/WeightedBrierScore.R")
 ```
 
 
@@ -626,51 +549,12 @@ $f^\text{Null}(\tau)$ is the same for all individuals, as it is derived purely f
 
 The evaluated model should ideally provide better predictions by incorporating individual-specific covariates, leading to a lower Brier Score.
 
-
 ```{r}
-
-ScaledBrierScore <- function(predictions,
-                             predictions_null,
-                             tau,
-                             time, 
-                             status,
-                             cause, 
-                             cens.code){
-  # Number of patients
-  n <- length(predictions)
-  # Length of predictions null
-  pn <- length(predictions_null)
-  # If only a single value is given, repeat it for all observations 
-  if (pn == 1) {predictions_null <- rep(predictions_null, n)}
-  
-  BS_weighted_null <- WeightedBrierScore(predictions = predictions_null,
-                                    tau = tau,
-                                    time = time,
-                                    status = status,
-                                    cause = cause, 
-                                    cens.code = cens.code)$weighted.brier.score
-  
-  BS_weighted <- WeightedBrierScore(predictions = predictions,
-                                tau = tau,
-                                time = time,
-                                status = status,
-                                cause = cause, 
-                                cens.code = cens.code)$weighted.brier.score
-
-
-  BS_scaled = 1 - (BS_weighted/BS_weighted_null)
-  
-  return(list(weighted.brier.score.null = BS_weighted_null, 
-              weighted.brier.score = BS_weighted, 
-              scaled.brier.score = BS_scaled,
-              percentage.scaled.brier.score = BS_scaled*100,
-              tau = tau))
-}
+source("CompRisksMetrics/ScaledBrierScore.R")
 ```
 
 
 ```{r}
-
 # Models -------------------
 fit_csh <- riskRegression::CSC(Hist(time, status) ~
 age + size +
@@ -803,7 +687,7 @@ In the paper the IPA is the Scaled Brier.... I am not sure if they do it weighte
 
 Next step: Check if the Score implementation is using ipcw or not for the Scaled Brier. 
 
-#### Inegrated brier score. 
+#### Integrated brier score. 
 
 The Integrated Brier Score (IBS) provides an overall measure of model performance across all time points. A lower IBS indicates better predictive performance across the entire follow-up period. It accounts for both early and late prediction accuracy, balancing errors over time.
 
@@ -846,53 +730,7 @@ for (j in seq_along(tau_range)){
 
 
 ```{r}
-
-# For integrated Brier score
-trapezoidal.integration <- function(x, y) {
-  if (length(x) != length(y)) stop("x and y must have the same length")
-  sum(diff(x) * (head(y, -1) + tail(y, -1)) / 2)
-}
-
-## Function to calculate Brier
-IntegratedBrierScore <- function(prediction_matrix,
-                                 taus,
-                                 time,
-                                 status,
-                                 cause, 
-                                 cens.code){
-  
-  # Number of times evaluated the brier score
-  nt <- dim(prediction_matrix)[2]
-  # Initialize a empty vector for brier scores
-  bs <- rep(0, nt)
-  # Loop through array
-  # Rows: individuals, Columns: time points
-  for (j in seq(nt)) {
-    # Get the model prediction and time of evaluation tau
-    tau <- taus[j]
-    predictions <- prediction_matrix[,j] 
-    # Calculate Weighted Brier Score
-    BS_we <- WeightedBrierScore(predictions = predictions,
-                       tau = tau,
-                       time =  time,
-                       status = status,
-                       cause = cause, 
-                       cens.code = cens.code)$weighted.brier.score
-    # Store value 
-    bs[j] <- BS_we
-  }
-  # Calculate max and min time to normalize with respect to time interval
-  t.max = max(taus)
-  t.min = min(taus)
-  # Apply trapezoidal integration
-  ibs <- trapezoidal.integration(bs, taus)/(t.max - t.min)
-  
- 
-  return(list(integrated.brier.score = ibs,
-              weighted.brier.score = bs,
-              taus = taus))
-}
-
+source("CompRisksMetrics/IntegratedBrierScore.R")
 ```
 
 

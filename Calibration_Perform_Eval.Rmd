@@ -24,20 +24,59 @@ library(tidyr)
 ```
 
 
-We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+### Download data 
 
-https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+Github: https://github.com/survival-lumc/ValidationCompRisks/tree/main/Data
+
+Paper: doi https://doi.org/10.1136/bmj-2021-069249
+
+"The dataset is part of FOCUS cohort (van Geloven N, Swanson SA, Ramspek CL, et al. 2020). In this retrospective cohort, all consecutive patients aged 65 years or older with breast cancer diagnosed in the South-West region of the Netherlands in the years 1997-2004 were included. The registry contains information on patient-characteristics including tumor characteristics, treatment and disease recurrence. 
+Follow-up data on patient survival (maximal 5 years) was obtained by linkage with the municipal population registries. We applied the following inclusion criteria (same inclusion criteria that were used in the validation cohort): patients with primary breast cancer who received primary breast surgery, and received no previous neoadjuvant treatment. We used a random subset of 1000 patients to allow Open Access data sharing. Out of these 1000 patients in the development set, 135 developed breast cancer recurrence and 204 had a non-recurrence death within the five years follow up (cumulative incidence curve in Supplementary Figure 1).
+Except for the higher age inclusion criterion in the validation cohort, patients were rather similar on the listed characteristics in the development and validation cohorts," called rdata and vdata in Github respectively. 
+
+```{r}
+# Create a directory to store downloaded data
+if (!dir.exists("LumcData")) {
+  dir.create("LumcData")
+}
+
+# Fix paths
+file_urls <- c(
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/rdata.rds",
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/vdata.rds"
+)
+
+# Download files
+for (url in file_urls) {
+  file_name <- basename(url) # Extract the file name from the URL
+  if (!file.exists("LumcData/rdata.rds") || !file.exists("LumcData/vdata.rds")) {
+    message("Downloading data")
+    download.file(url, destfile = file.path("LumcData", file_name), method = "libcurl")
+  } else {
+    message("Data is already downloaded")
+  }
+}
+
+# Check if the files are downloaded
+list.files("LumcData")
+
+
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249 and https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
 
 
 ```{r}
 # Import data ------------------
-rdata <- readRDS(here::here("CompRisks/survival-lumc-rdata.rds"))
-vdata <- readRDS(here::here("CompRisks/survival-lumc-vdata.rds"))
+rdata <- readRDS("LumcData/rdata.rds")
+vdata <- readRDS("LumcData/vdata.rds")
 
 rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
 vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
 
 ```
+
 
 ## Calibration
 
@@ -68,11 +107,11 @@ The smoothed curve should only be plotted over the range of observed risks and n
 
 #### Calibration plot using pseudo-observations (LOESS smoothing)
 
-One way is to use pseudo-observations. Pseudo-observation approximate the individual contribution to the overall CIF estimate by using leave-one-out approach. First, the CIF is estimated for all the individuals at a given time point. Then, the estimate is recalculated removing one individual at a time. These estimations are based on non-parametric calculation of the CIF (Aalen Johansen estimator). 
+One way is to use pseudo-observations (U). Pseudo-observation approximate the individual contribution to the overall CIF estimate by using leave-one-out approach. First, the CIF is estimated for all the individuals at a given time point. Then, the estimate is recalculated removing one individual at a time. These estimations are based on non-parametric calculation of the CIF (Aalen Johansen estimator). 
 
 It is a technique that allow to handle censoring and competing risks data by creating proxy estimate for all the individuals.
 
-$$Pseudovalues_{i}(tau, k) = n \hat{CIF}_{k}(tau) - (n-1)\hat{CIF}_{k}^{(-i)}(tau)$$
+$$U_{i}(\tau, k) = n \hat{CIF}_{k}(\tau) - (n-1)\hat{CIF}_{k}^{(-i)}(\tau)$$
 
 It is an small sample, therefore pseudovalues might be very extreme due to the removal of an individual having an extreme effect in the calculation of the CIF estimation.
 
@@ -172,7 +211,6 @@ head(calplot_pseudo$plotFrames$csh_validation)
 However, we do not want to depend on riskRegression, since it is inflexible with the models to fit the data with. 
 
 To do so, we can calculate pseudovalues with pseudoci or prodlim by using nearest neighboors for kernel smoothing.
-
 
 First, make sure that the outputs are the same
 
@@ -635,6 +673,10 @@ Gathering all in the same function
 
 ```{r}
 source("CompRisksMetrics/CalibrationPlot.R")
+```
+
+
+```{r}
 
 plotFrame <- CalibrationPlot(predictions=pred,
                                  data=vdata, 
@@ -1220,3 +1262,4 @@ We get same results from the code, although in the paper:
 The calibration intercept was estimated at -0.15 [95% CI -0.36 to 0.05] also pointing towards slight overestimation (though not statistically significant). This number for example means that for an estimated risk of 30%, the expected actual risk is 1-0.7^(exp(-0.15))=26%. **The calibration slope was 1.22 [95% CI 0.84 to 1.60]** (?), which would indicate too homogeneous predictions but the wide confidence interval precludes any firm conclusions from it. The p-value for the joint test on calibration intercept and slope was 0.09.
 
 
+# Next add O/E ratio and intercept and slope as part of the functions
