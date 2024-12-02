@@ -36,10 +36,47 @@
 #' 
 #' 
 
-
-
-
 ScaledBrierScore <- function(predictions,
+                              predictions_null,
+                              tau,
+                              time, 
+                              status,
+                              cause, 
+                              cens.code){
+  # Number of patients
+  n <- length(predictions)
+  # Length of predictions null
+  pn <- length(predictions_null)
+  # If only a single value is given, repeat it for all observations 
+  if (pn == 1) {predictions_null <- rep(predictions_null, n)}
+  
+  BS_weighted_null <- WeightedCRBrierScore(predictions = predictions_null,
+                                            tau = tau,
+                                            time = time,
+                                            status = status,
+                                            cause = cause, 
+                                            cens.code = cens.code)
+  
+  BS_weighted <- WeightedCRBrierScore(predictions = predictions,
+                                       tau = tau,
+                                       time = time,
+                                       status = status,
+                                       cause = cause, 
+                                       cens.code = cens.code)
+  
+  
+  BS_scaled = 1 - (BS_weighted/BS_weighted_null)
+  
+  return(list(weighted.brier.score.null = BS_weighted_null, 
+              weighted.brier.score = BS_weighted, 
+              scaled.brier.score = BS_scaled,
+              percentage.scaled.brier.score = BS_scaled*100,
+              tau = tau))
+}
+
+#### Implementations of weighted CR brier score used:
+
+ScaledBrierScore2 <- function(predictions,
                              predictions_null,
                              tau,
                              time, 
@@ -53,14 +90,14 @@ ScaledBrierScore <- function(predictions,
   # If only a single value is given, repeat it for all observations 
   if (pn == 1) {predictions_null <- rep(predictions_null, n)}
   
-  BS_weighted_null <- WeightedBrierScore(predictions = predictions_null,
+  BS_weighted_null <- WeightedCRBrierScore2(predictions = predictions_null,
                                     tau = tau,
                                     time = time,
                                     status = status,
                                     cause = cause, 
                                     cens.code = cens.code)$weighted.brier.score
   
-  BS_weighted <- WeightedBrierScore(predictions = predictions,
+  BS_weighted <- WeightedCRBrierScore2(predictions = predictions,
                                 tau = tau,
                                 time = time,
                                 status = status,

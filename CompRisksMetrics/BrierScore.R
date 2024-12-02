@@ -1,5 +1,5 @@
 #'
-#' Title: Brier score
+#' Title: Brier score Binary
 #' 
 #' Brier score is the overall prediction error, or the average squared difference between estimated risks (predicted probabilities) and actual outcomes.
 #' Numeric values ranging from 0 (perfect predictions) to 1 (maximum error), where lower scores indicate better model performance. 
@@ -12,18 +12,32 @@
 #' 
 #' @param predictions: vector of model predictions.
 #' @param time time vector of times. Time-to-event.
-#' @param status vector of events. 1) If survival -> [0,...,1]. 2) If competing risks -> [0,...,K].
+#' @param status vector of events. Binary [0,...,1]
 #' @param tau evaluation time of interest.
 #' @param cause event of interest.
 #' 
 #' @return Numeric value, overall prediction error ranging from 0 to 1, where lower scores indicate better performance at specific time tau of interest.
 #' 
 
-BrierScore <- function(predictions,
-                        time, 
-                        status, 
-                        tau, 
-                        cause){ 
+#BinaryBrierScore <- function(predictions,
+#                        time, 
+#                        status, 
+#                        tau, 
+#                        cens.code){ 
+#  
+#  y_true = ((time <= tau) * (status != cens.code))
+#  
+#  BS = mean((predictions-y_true)^2)
+#  
+#  return(BS)
+#  
+#}
+
+BinaryBrierScore <- function(predictions,
+                             time, 
+                             status, 
+                             tau, 
+                             cause){ 
   
   y_true = ((time <= tau) * (status == cause))
   
@@ -32,3 +46,6 @@ BrierScore <- function(predictions,
   return(BS)
   
 }
+
+
+
