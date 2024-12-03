@@ -127,6 +127,16 @@ Ex:
 If the model predicts recurrence in patients with post-surgery cancer based on various risk factors (age, tumor stage, etc.), and the decision curve shows a net benefit curve higher than the "treat all" line between threshold probabilities of 0.15 and 0.35, this means that using the model to decide on interventions (e.g., follow-up treatments) is beneficial for patients with a 15-35% risk of recurrence. The model allows clinicians to intervene where necessary while avoiding unnecessary treatments for low-risk patients.
 
 What is the best time to predict or evaluate, maybe 3 y for GRI? right after diagnoses? 
+Formulation for Net benefit (NB):
+
+$$ NB = \frac{TP - FPxf}{N}$$
+
+
+$$f = \frac{threshold}{1-threshold}$$
+TP - true positive - The number of patients correctly identified by the model as a high risk of recurrence. Meaning, they are classified as high risk, and actually have a high risk).
+
+FN - false positive - The number of patients incorrectly identified by the model as a high risk of recurrence. They are classified as high risk, but they do not actually have a high risk.
+
 
 In the paper it is calculated with the following function:
 
@@ -462,15 +472,6 @@ dca_vdata <- stdca(
 ```
 
 
-Formulas:
-
-$$ NB = \frac{TP - FPxf}{N}$$
-
-
-$$f = \frac{threshold}{1-threshold}$$
-TP - true positive - number of patients that have a high risk of recurrence and is true. 
-
-FN - false positive - number of patients that 
 
 #### Next: Modify function so it can be used at different time points (or generate some numerical measures?)
 
