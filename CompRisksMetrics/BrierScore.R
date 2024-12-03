@@ -3,7 +3,8 @@
 #' 
 #' Brier score is the overall prediction error, or the average squared difference between estimated risks (predicted probabilities) and actual outcomes.
 #' Numeric values ranging from 0 (perfect predictions) to 1 (maximum error), where lower scores indicate better model performance. 
-#'
+#' Important consideration is that it will not adjust for censoring or competing risks, for that the Weighted Brier Score can be computed
+#' 
 #' \deq{BS = \frac{1}{N} \sum_{i=1}^{N}(\hat{y}_{i}(t)-y_{i}({t}))^2}
 #' 
 #' Where N is the number of observations,

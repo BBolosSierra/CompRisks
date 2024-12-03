@@ -32,11 +32,10 @@
 #' @param tau evaluation time of interest or vector with a range of times [0, max(tau)].
 #' @param cause event of interest.
 #' @param cens.code value of censoring status, commonly censor patients have status of 0.
-#' 
+#' @param cmprsk logical vector for the presence of competing risks. If TRUE, there are competing risks, otherwise binary outcomes.
 #' 
 #' @return 
 #'  \itemize{
-#'   \item brier.score: Unweighted brier score
 #'   \item weighted.brier.score: Numeric value, weighted overall prediction error ranging from 0 to 1, where lower scores indicate better performance at specific time tau of interest.
 #'   \item tau: vector of times of evaluation
 #'   \item n: Number of observations
@@ -49,192 +48,31 @@
 #' 
 #' 
 
-# Same as before but consider censoring (not competing risks)
-#WeightedBinaryBrierScore <- function(predictions, time, status, tau, cens.code) {
-#  # Calculate individual censoring weights 
-#  ind.cens.weights = censor.prob.KM.individual(time = time, 
-#                                               status = status, 
-#                                               cens.code = cens.code)
-#  
-#  # Identify the binary outcome for the event of interest
-#  y_true = ((time <= tau) & (status != cens.code))
-#  
-#  # Initialize vector for residuals
-#  residuals = numeric(length(predictions))
-#  
-#  ## Consider censoring without competing risks
-#  # Case 1: Event occurs before tau
-#  index = (time <= tau & status != cens.code)
-#  residuals[index] = ((1 - predictions[index])^2) / ind.cens.weights[index]
-#  
-#  # Case 2: Censored before tau (including competing risks treated as censored)
-#  index = (time <= tau & status == cens.code)
-#  residuals[index] = 0
-#  
-#  # Case 3: Event or censoring after tau
-#  index = (time > tau)
-#  residuals[index] = (predictions[index]^2) / ind.cens.weights[index]
-#  
-#  # Compute the Brier Score
-#  BrierScoreCensored = mean(residuals)
-#  
-#  return(BrierScoreCensored)
-#}
-
-# Same as before but consider censoring (not competing risks)
-WeightedBinaryBrierScore <- function(predictions, time, status, tau, cause, cens.code) {
-  # Calculate individual censoring weights 
-  ind.cens.weights = censor.prob.KM.individual(time = time, 
-                                               status = status, 
-                                               cens.code = cens.code)
-  
-  # Identify the binary outcome for the event of interest
-  y_true = ((time <= tau) & (status == cause))
-  
-  # Initialize vector for residuals
-  residuals = numeric(length(predictions))
-  
-  ## Consider censoring without competing risks
-  # Case 1: Event occurs before tau
-  index = (time <= tau & status == cause)
-  residuals[index] = ((1 - predictions[index])^2) / ind.cens.weights[index]
-  
-  # Case 2: Censored before tau (including competing risks treated as censored)
-  index = (time <= tau & status == cens.code)
-  residuals[index] = 0
-  
-  # Case 3: Event or censoring after tau
-  index = (time > tau)
-  residuals[index] = (predictions[index]^2) / ind.cens.weights[index]
-  
-  # Compute the Brier Score
-  BrierScore = mean(residuals)
-  
-  return(BrierScore)
-}
-
-
-## Weighted BRIER-SCORE
-WeightedBinaryBrierScore2 <- function(predictions,
-                                       tau,
-                                       time, 
-                                       status,
-                                       cause,
-                                       cens.code){
+WeightedBrierScore <- function(predictions, 
+                                tau, 
+                                time, 
+                                status, 
+                                cause, 
+                                cens.code, 
+                                cmprsk = FALSE) {
   # Extract the censoring probabilities
-  G <- censor.prob.KM(time=time, 
-                         status=status, 
-                         cens.code=cens.code)
-  # G[,1] Time points where censoring probabilities are estimated
-  # G[,2] Estimated censoring probabilities
-  
-  # Create a empty vector for weights
-  n     = length(predictions)
-  W     = rep(0,n)
-  
-  # Binary indicator for individuals that are still at risk
-  Y_tilde = (time > tau)
-  # Binary indicator for individuals that have experienced the event at time tau
-  Y_true  = (time <= tau) * (status == cause)
-  
-  # Calculate G1 and G2
-  # Compute IPCW
-  for( i in 1:n ){
-    
-    # Get the index of censoring time greater or equal than the individual observed times
-    indx1 = which(G[,1] >= time[i])
-    # Get the index of time points greater or equal than evaluation time
-    indx2 = which(G[,1] >= tau)
-    
-    # Calculate G1: censoring probabilities just before observed times T 
-    if( length(indx1) > 0 ){
-      G1 = G[indx1[1],2] # Takes the earliest estimated censoring probabilities 
-    } else {
-      G1 = 1
-    }
-    # Calculate G2: censoring probabilities at tau or greater
-    if( length(indx2) > 0 ){
-      G2 = G[indx2[1],2]
-    } else {
-      G2 = 1
-    }
-    
-    W[i] = Y_tilde[i]/G2 + Y_true[i]/G1        
-
-  }    
-  
-  S    = (1/n)*sum(Y_tilde)
-
-  norm        = 1/n
-  BS_we       = sum(W*(Y_true - predictions)^2)*norm
-  
-  return(list(weighted.brier.score = BS_we, 
-              tau = tau,
-              n=n, 
-              n.risk=S*n))
-}
-
-
-#### Competing risks
-
-WeightedCRBrierScore <- function(predictions, time, status, tau, cause, cens.code) {
-  # Calculate individual censoring weights
-  ind.cens.weights = censor.prob.KM.individual(time=time, 
-                                               status=status, 
-                                               cens.code=cens.code)
-  
-  # Identify the cause of interest
-  y_true = ((time <= tau) & (status == cause))
-  
-  # Initialize vecotr for residuals
-  residuals = numeric(length(predictions))
-  
-  ## As in riskRegression, consider competing risks and censoring
-  # Case 1: Event of interest occurs before tau
-  index = (time <= tau & status == cause)
-  residuals[index] = ((1 - predictions[index])^2) / ind.cens.weights[index]
-  
-  # Case 2: Competing event occurs before tau
-  index = (time <= tau & status != cause & status != 0)
-  residuals[index] = (predictions[index]^2) / ind.cens.weights[index]
-  
-  # Case 3: Censored before tau
-  index = (time <= tau & status == 0)
-  residuals[index] = 0
-  
-  # Case 4: Event or censoring after tau
-  index = (time > tau)
-  residuals[index] = (predictions[index]^2) / ind.cens.weights[index]
-  
-  # Compute the Brier Score
-  BrierScoreCompRisks = mean(residuals)
-  
-  return(BrierScoreCompRisks)
-}
-
-WeightedCRBrierScore2 <- function(predictions, 
-                                 tau, 
-                                 time, 
-                                 status, 
-                                 cause, 
-                                 cens.code) {
-  # Extract the censoring probabilities
-  G <- censor.prob.KM(time = time, status = status, cens.code = cens.code)
+  G <- censor.prob.KM(time = time, 
+                      status = status, 
+                      cens.code = cens.code)
   
   # Create an empty vector for weights
   n <- length(predictions)
   W <- rep(0, n)
   
-  # Binary indicator for individuals that are still at risk at tau
+  # Binary indicator for individuals still at risk at tau
   Y_tilde <- (time > tau)
   
-  # Binary indicator for individuals that have experienced the event of interest by tau
+  # Binary indicator for individuals experiencing the event of interest by tau
   Y_true <- (time <= tau & status == cause)
   
   # Create a residuals vector for the weighted Brier score
   residuals <- rep(0, n)
   
-  # Calculate G1 and G2
   for (i in 1:n) {
     # Get the index of censoring time greater or equal than the individual's observed time
     indx1 <- which(G[, 1] >= time[i])
@@ -247,23 +85,40 @@ WeightedCRBrierScore2 <- function(predictions,
     # Calculate G2: censoring probabilities at tau or greater
     G2 <- if (length(indx2) > 0) G[indx2[1], 2] else 1
     
-    # Handle weights based on the event type
-    if (status[i] == cause && time[i] <= tau) {
-      # Case 1: Event of interest occurs before tau
-      W[i] <- 1 / G1
-      residuals[i] <- (1 - predictions[i])^2 / G1
-    } else if (status[i] != cause && status[i] != cens.code && time[i] <= tau) {
-      # Case 2: Competing risks before tau
-      W[i] <- 1 / G1
-      residuals[i] <- (predictions[i]^2) / G1
-    } else if (status[i] == cens.code && time[i] <= tau) {
-      # Case 3: Censored before tau
-      W[i] <- 0
-      residuals[i] <- 0
-    } else if (time[i] > tau) {
-      # Case 4: Event or censoring after tau
-      W[i] <- 1 / G2
-      residuals[i] <- (predictions[i]^2) / G2
+    if (cmprsk) {
+      # Handle weights and residuals considering competing risks
+      if (status[i] == cause && time[i] <= tau) {
+        # Case 1: Event of interest occurs before tau
+        W[i] <- 1 / G1
+        residuals[i] <- (1 - predictions[i])^2 / G1
+      } else if (status[i] != cause && status[i] != cens.code && time[i] <= tau) {
+        # Case 2: Competing risks before tau
+        W[i] <- 1 / G1
+        residuals[i] <- (predictions[i]^2) / G1
+      } else if (status[i] == cens.code && time[i] <= tau) {
+        # Case 3: Censored before tau
+        W[i] <- 0
+        residuals[i] <- 0
+      } else if (time[i] > tau) {
+        # Case 4: Event or censoring after tau
+        W[i] <- 1 / G2
+        residuals[i] <- (predictions[i]^2) / G2
+      }
+    } else {
+      # Handle weights and residuals ignoring competing risks
+      if (time[i] <= tau && status[i] == cause) {
+        # Case 1: Event occurs before tau
+        W[i] <- 1 / G1
+        residuals[i] <- (1 - predictions[i])^2 / G1
+      } else if (time[i] <= tau && status[i] == cens.code) {
+        # Case 2: Censored before tau
+        W[i] <- 0
+        residuals[i] <- 0
+      } else if (time[i] > tau) {
+        # Case 3: Event or censoring after tau
+        W[i] <- 1 / G2
+        residuals[i] <- (predictions[i]^2) / G2
+      }
     }
   }
   

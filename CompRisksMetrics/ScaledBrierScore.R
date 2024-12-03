@@ -23,6 +23,7 @@
 #' @param tau evaluation time of interest or vector with a range of times [0, max(tau)].
 #' @param cause event of interest.
 #' @param cens.code value of censoring status, commonly censor patients have status of 0.
+#' @param cmprsk logical vector for the presence of competing risks. If TRUE, there are competing risks, otherwise binary outcomes.
 #'
 #' @return 
 #'  \itemize{
@@ -42,7 +43,8 @@ ScaledBrierScore <- function(predictions,
                               time, 
                               status,
                               cause, 
-                              cens.code){
+                              cens.code,
+                              cmprsk){
   # Number of patients
   n <- length(predictions)
   # Length of predictions null
@@ -50,19 +52,21 @@ ScaledBrierScore <- function(predictions,
   # If only a single value is given, repeat it for all observations 
   if (pn == 1) {predictions_null <- rep(predictions_null, n)}
   
-  BS_weighted_null <- WeightedCRBrierScore(predictions = predictions_null,
+  BS_weighted_null <- WeightedBrierScore(predictions = predictions_null,
                                             tau = tau,
                                             time = time,
                                             status = status,
                                             cause = cause, 
-                                            cens.code = cens.code)
+                                            cens.code = cens.code, 
+                                            cmprsk = cmprsk)$weighted.brier.score
   
-  BS_weighted <- WeightedCRBrierScore(predictions = predictions,
+  BS_weighted <- WeightedBrierScore(predictions = predictions,
                                        tau = tau,
                                        time = time,
                                        status = status,
                                        cause = cause, 
-                                       cens.code = cens.code)
+                                       cens.code = cens.code, 
+                                       cmprsk = cmprsk)$weighted.brier.score
   
   
   BS_scaled = 1 - (BS_weighted/BS_weighted_null)
@@ -74,7 +78,7 @@ ScaledBrierScore <- function(predictions,
               tau = tau))
 }
 
-#### Implementations of weighted CR brier score used:
+#### Other implementation 
 
 ScaledBrierScore2 <- function(predictions,
                              predictions_null,
@@ -82,7 +86,8 @@ ScaledBrierScore2 <- function(predictions,
                              time, 
                              status,
                              cause, 
-                             cens.code){
+                             cens.code, 
+                             cmprsk){
   # Number of patients
   n <- length(predictions)
   # Length of predictions null
@@ -90,19 +95,21 @@ ScaledBrierScore2 <- function(predictions,
   # If only a single value is given, repeat it for all observations 
   if (pn == 1) {predictions_null <- rep(predictions_null, n)}
   
-  BS_weighted_null <- WeightedCRBrierScore2(predictions = predictions_null,
+  BS_weighted_null <- WeightedBrierScore2(predictions = predictions_null,
                                     tau = tau,
                                     time = time,
                                     status = status,
                                     cause = cause, 
-                                    cens.code = cens.code)$weighted.brier.score
+                                    cens.code = cens.code,
+                                    cmprsk = cmprsk)
   
-  BS_weighted <- WeightedCRBrierScore2(predictions = predictions,
+  BS_weighted <- WeightedBrierScore2(predictions = predictions,
                                 tau = tau,
                                 time = time,
                                 status = status,
                                 cause = cause, 
-                                cens.code = cens.code)$weighted.brier.score
+                                cens.code = cens.code, 
+                                cmprsk = cmprsk)
 
 
   BS_scaled = 1 - (BS_weighted/BS_weighted_null)

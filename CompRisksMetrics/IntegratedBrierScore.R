@@ -2,6 +2,7 @@
 #' Title: Integrated Brier Score
 #' 
 #' The IBS is a single, time-averaged value summarizing the prediction error across the entire time range.
+#' For survival cases and competing risks cases.
 #' It is computed by integrating the Brier Score area under the curve using the trapezoidal rule and normalizing by the length of the time interval.
 #' Numeric from 0 to 1, lower values indicate better performance
 #'
@@ -19,6 +20,7 @@
 #' @param status vector of events. 1) If survival -> [0,...,1]. 2) If competing risks -> [0,...,K].
 #' @param cause event of interest. 
 #' @param cens.code value of censoring status, commonly censor patients have status of 0.
+#' @param cmprsk logical vector for the presence of competing risks. If TRUE, there are competing risks, otherwise binary outcomes.
 #' 
 #' @return 
 #'  \itemize{
@@ -34,7 +36,8 @@ IntegratedBrierScore <- function(prediction_matrix,
                                  time,
                                  status,
                                  cause, 
-                                 cens.code){
+                                 cens.code, 
+                                 cmprsk){
   
   # Number of times evaluated the brier score
   nt <- dim(prediction_matrix)[2]
@@ -47,12 +50,13 @@ IntegratedBrierScore <- function(prediction_matrix,
     tau <- taus[j]
     predictions <- prediction_matrix[,j] 
     # Calculate Weighted Brier Score
-    BS_we <- WeightedCRBrierScore(predictions = predictions,
+    BS_we <- WeightedBrierScore2(predictions = predictions,
                        tau = tau,
                        time =  time,
                        status = status,
                        cause = cause, 
-                       cens.code = cens.code)
+                       cens.code = cens.code, 
+                       cmprsk = cmprsk)
     # Store value 
     bs[j] <- BS_we
   }

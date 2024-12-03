@@ -229,7 +229,8 @@ BinaryBrierScore(predictions=pred,
 
 ```
 
-Since these implementations are for binary outcome, we can expect that the overall Brier score may be inflated because the competing risks true contribution to the event of interest is ignored.
+Since these implementations are for binary outcome and do not consider censoring and competing risks, we can expect that the overall Brier score may be inflated because the competing risks true contribution to the event of interest is ignored.
+It can not be used in this scenario.
 
 
 ##### Weighted Brier Score - IPCW - Adjusting for censoring
@@ -321,30 +322,39 @@ The error term $(D_i(\tau) - f_i(\tau))^2$ in the reduced formula directly corre
 $(0 - \hat{S}(\tau, \mathbf{x}_i))^2$ when $D_i(\tau) = 0$.
 $(1 - \hat{S}(\tau, \mathbf{x}_i))^2$ when $D_i(\tau) = 1$.
 
+There is two implementations of the Weighted Brier Score:
 
 ```{r}
+# As previously described in the formulas above
 source("CompRisksMetrics/WeightedBrierScore.R")
+# More like riskregression set up from https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
+source("CompRisksMetrics/WeightedBrierScore2.R")
 ```
 
 
 ```{r}
 # Valid for non-competing risks and censoring cases
-# Using individual censoring probability weights. 
 # Extension of BinaryBrierScore
-WeightedBinaryBrierScore(predictions=pred, 
+WeightedBrierScore(predictions=pred, 
             time = vdata$time, 
             status = vdata$status,
             cause = primary_event,
             tau = horizon, 
-            cens.code = 0)
+            cens.code = 0, 
+            cmprsk=FALSE)
+```
 
-# Alternative implementation with the above formulas:
-WeightedBinaryBrierScore2(predictions=pred,
-                                tau=5,
-                                time=vdata$time, 
-                                status=vdata$status,
-                                cause=primary_event, 
-                                cens.code = 0)
+Simplification inspired in riskRegression and https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
+
+```{r}
+## Using individual censoring weights formula
+WeightedBrierScore2(predictions=pred, 
+            time = vdata$time, 
+            status = vdata$status,
+            cause = primary_event,
+            tau = horizon, 
+            cens.code = 0, 
+            cmprsk=FALSE)
 ```
 
 
@@ -356,35 +366,39 @@ However, although considering censoring... are we considering competing risks???
 
 ### Considering competing risks
 
-In order to consider the competing risks
+RiskRegression result:
 
 ```{r}
-WeightedCRBrierScore(predictions=pred, 
+score_vdata$Brier$score
+```
+
+
+In order to consider the competing risks we set the parameter cmprsk to TRUE. 
+
+```{r}
+WeightedBrierScore(predictions=pred, 
             time = vdata$time, 
             status = vdata$status,
             cause = primary_event,
-            tau = horizon,
-            cens.code = 0)
+            tau = horizon, 
+            cens.code = 0, 
+            cmprsk=TRUE)
 ```
 
-The weighted.brier.score is the same as in riskRegression when considering censoring and competing risks. 
 
-
-Simplification of Weighted brier:
-
-The  simplification is based on the BrierScore.R function with censoring by adding an additional case with handling the competing risks:
+Simplification: https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
 
 
 ```{r}
 # Weighted version of brier score
 # Valid for competing risks when censoring:
-WeightedCRBrierScore2(predictions=pred, 
+WeightedBrierScore2(predictions=pred, 
             time = vdata$time, 
             status = vdata$status,
             cause = primary_event,
             tau = horizon, 
-            cens.code = 0)
-
+            cens.code = 0, 
+            cmprsk = TRUE)
 ```
 
 
@@ -461,7 +475,8 @@ ScaledBrierScore(predictions = pred,
                  time=vdata$time,
                  status=vdata$status,
                  cause=primary_event, 
-                 cens.code = 0)
+                 cens.code = 0, 
+                 cmprsk = TRUE)
 
 ```
 
@@ -492,7 +507,8 @@ ScaledBrierScore(predictions = pred,
                  time=vdata$time,
                  status=vdata$status,
                  cause=primary_event, 
-                 cens.code = 0)
+                 cens.code = 0, 
+                 cmprsk = TRUE)
 ```
 
 With the second implementation:
@@ -504,14 +520,19 @@ ScaledBrierScore2(predictions = pred,
                  time=vdata$time,
                  status=vdata$status,
                  cause=primary_event, 
-                 cens.code = 0)
+                 cens.code = 0, 
+                 cmprsk = TRUE)
 
 ```
 
 So, there is a difference with the result from riskRegression
 
-why? https://rdrr.io/cran/riskRegression/src/R/getNullModel.R
+```{r}
+score_vdata$Brier$score
+```
 
+
+why? https://rdrr.io/cran/riskRegression/src/R/getNullModel.R
 
 They might be using the validation data to fit the null model instead of the development data rdata: 
 
@@ -537,7 +558,8 @@ ScaledBrierScore(predictions = pred,
                  time=vdata$time,
                  status=vdata$status,
                  cause=primary_event, 
-                 cens.code = 0)
+                 cens.code = 0, 
+                 cmprsk = TRUE)
 ```
 
 In the paper the IPA is the Scaled Brier... Now it gets closer to the result in riskRegression.
@@ -642,7 +664,8 @@ IntegratedBrierScore(prediction_matrix = prediction_matrix,
                                  time = vdata$time,
                                  status = vdata$status,
                                  cause = primary_event, 
-                                 cens.code = 0)
+                                 cens.code = 0, 
+                                 cmprsk = TRUE)
 ```
 
 
