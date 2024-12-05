@@ -1,4 +1,4 @@
-# Metrics for survival analysis. 
+## Time to event metrics
 
 The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. 
 

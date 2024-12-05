@@ -5,7 +5,7 @@ date: "2024-10-09"
 ---
 
 
-# Metrics for survival analysis. 
+## Time to event metrics
 
 The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. For instance, if metrics such calibration or brier score need to be calculated, the model fit to the data must be an object of a riskregression class, to be able to use Score function that calculates the metrics. That limitis the models that can be fit. 
 

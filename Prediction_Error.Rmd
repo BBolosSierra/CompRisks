@@ -1,11 +1,11 @@
 ---
-title: "Prediction Error Brier Scores"
+title: "Prediction error metrics"
 output: html_document
 date: "2024-10-19"
 ---
 
 
-# Metrics for survival analysis. 
+## Time to event metrics
 
 The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. 
 
@@ -754,9 +754,40 @@ In other packages, the trapezoidal rule is used as well: https://github.com/sebp
 
 ### Details about censoring weights and IPCW. 
 
+IPCW are calculated as the inverse of the censoring probability weights.
+**The censoring probability represents the likelihood that a patient remains uncensored (i.e., continues to be observed) up to a given time t. This probability helps us adjust for patients who are lost to follow-up or have reached the end of the study without experiencing an event**
+
+It is important to differenciate between survival probability and censoring probability:
+
+1) Survival Probability is specifically about avoiding the event of interest (e.g., death from colorectal cancer).
+
+2) Censoring Probability is about remaining observable up to a certain time; it’s about the likelihood that the patient stays in the study and is not "lost" for other reasons.
+
+**These probabilities are different because censoring and the event of interest are often independent in survival analysis.**
+
+In other words, censoring probabiltiy is the likelihood that a patient remains observable in the study up to a certain time point. It is unrelated to whether they experience the event of interest (i.e death from colorectal cancer).
+Censoring probabilities, can for instance be related to administrative censoring (when the study ends while the patient is still alive and has not experienced the event), or loss to follow-up (when the patient stops participating in the study for any reason unrelated to the event of interest). Again independent of the event. It does not measure survival from the event but rather the likelihood that the patient status (event or no event) can still be observed.
+
 #### How to calculate the IPCW
 
-The IPCW in calculated from **censoring probabilities**, which is the probability of being *uncensored* at time $\tau$.
+IPCW is the inverse of the probability censoring weights. To be calculated we need the censoring probabilities, which is the probability of being uncensored at time  $\tau$.
+
+In riskRegression it can be calculated with the following formula: 
+
+```{r}
+# method = marginal when non-parametric kaplan meier
+test <- riskRegression::ipcw(formula=Surv(time,status)~1,
+     data=vdata, 
+     times=seq(0,(max(vdata$time)+1),0.1),
+     subject.times=time, 
+     method='marginal', 
+     keep = c("fit"))
+
+test$IPCW.times
+```
+
+The warning shows that we need to deal with competing risks cases, since ipcw does not deal with it internally.
+
 
 The original status table:
 
@@ -765,18 +796,49 @@ table(vdata$status)
 ```
 
 ```{r}
-# Create additional censoring status
+# Create additional censoring status to deal with competing risks
+# 1:any event, 0:censored
 censor.status <- ifelse(vdata$status %in% c(1, 2), 1, 0)
+# 1:censored, 0:any event
 reversed.censor.status <-  ifelse(vdata$status %in% c(1, 2), 0, 1)
-
-table(censor.status, useNA = "always")
+# Check the tables 
+table(censor.status)
 ```
 
 ```{r}
 table(reversed.censor.status, useNA = 'always')
 ```
 
-One could think that the censor probabilities are calculated by using the kaplan meier estimator as follows:
+```{r}
+# method = marginal when non-parametric kaplan meier
+test <- riskRegression::ipcw(formula=Surv(time,censor.status)~1,
+     data=vdata, 
+     times=seq(0,(max(vdata$time)+1),0.1),
+     subject.times=time, 
+     method='marginal', 
+     keep = c("fit"))
+
+test$IPCW.times
+```
+
+```{r}
+# method = marginal when non-parametric kaplan meier
+test <- riskRegression::ipcw(formula=Surv(time,reversed.censor.status)~1,
+     data=vdata, 
+     times=seq(0,(max(vdata$time)+1),0.1),
+     subject.times=time, 
+     method='marginal', 
+     keep = c("fit"))
+
+test$IPCW.times
+```
+
+The logical censoring status that has to be used is the 1:any event, 0:censor. Internally, ipcw will reverse this status to 0:any event, 1:censored in order to calculate **censoring probabilities**, not the **survival probability**. 
+
+
+##### Alternatively one could think:
+
+The censor probabilities are calculated by using the kaplan meier estimator as follows. In fact it can be done, but the status has to be in reversed.
 
 ```{r}
 ## censor probability
@@ -794,66 +856,37 @@ censor.probability <- function(time, status){
 }
 ```
 
+This calculates the survival probabilities, not the censoring probabilities.
 
 ```{r}
 # If using 0 == censor, 1 == event
 head(censor.probability(time=vdata$time, status=censor.status))
 ```
+Here, we will calculate the censoring probabilities with kaplan meier custom function.
+
 ```{r}
 # Reversed: If using 1 == censor, 0 == event
 head(censor.probability(time=vdata$time, status=reversed.censor.status))
 ```
 
-Using the value 1 or 0 for censoring is important to calculate the true censoring distribution. Which is handy when calculating IPCW. 
+Again, we are interested in censoring probabilities, which are independent on the survival probabilities. From theorical perspective, we are assuming that censoring is independent on event. 
 
-
-Let's compare it with the formula in RiskRegression for ipcw ... What is happening in here?
-
-```{r}
-# method = marginal when non-parametric kaplan meier
-test <- riskRegression::ipcw(formula=Surv(time,status)~1,
-     data=vdata, 
-     times=seq(0,(max(vdata$time)+1),0.2),
-     subject.times=time, 
-     method='marginal', 
-     keep = c("fit"))
-
-test$IPCW.times
-```
-
-The event is 187 and the right.censored is 103. This is a problem of not considering competing risks with prodlim or with RiskRegression. The original status == 1 becomes the right.censored, while the status == 2 becomes the event... so that is completely wrong by using these default methods.
-
-If we modify the status to 1 when any event, and 0 when censored:
-
-```{r}
-#censor.status <- ifelse(vdata$status %in% c(1, 2), 1, 0)
-#vdata$censor.status <- censor.status
-# method = marginal when non-parametric kaplan meier
-test <- riskRegression::ipcw(formula=Surv(time,censor.status)~1,
-     data=vdata, 
-     times=seq.int(0,5,0.1),
-     subject.times=time, 
-     method='marginal', 
-     keep = c("fit"))
-
-test$IPCW.times
-```
-
-
-In riskregression formula they use prodlim:
+##### Calulation with prodlim:
 
 https://github.com/tagteam/riskRegression/blob/master/R/ipcw.R
 
 https://cran.r-project.org/web/packages/prodlim/prodlim.pdf
 
-The reverse parameter is set to TRUE when the goal is to calculate the censoring distribution when censoring is 0 and event is 1. What it does is to reverse the status (what we have done manually as well above). If 0 is censor, 1 is any event, the reverse would reverse it: 1 is censor and 0 is any event since the goal is the censoring distribution. 
+riskRegression is using prodlim, and so in our implementation we can use prodlim directly and account for competing risks internally. 
 
-**However if status is 0,1,2... when reversing, we have a NA for the status == 2, and therefore this method does not automatically work with competing risks, unless status is manually modified to be binary (0:censor, 1:any event).**
+We can use prodlim to calculate the censoring distribution by setting the  reverse parameter to TRUE when censoring is 0 and event is 1. What it does is to reverse the status (what we have done manually as well above). If 0 is censor, 1 is any event, the reverse would reverse it: 1 is censor and 0 is any event since the goal is the censoring distribution. 
+
+Therefore, the competing risks status, often equal to 2, has to be set to 1 internally to avoid NA. 
 
 If we check again with only using the prodlim:
 
 ```{r}
-#ipcw.marginal
+# Getting same result as riskRegression without manually set competing risk to status == 1 (any event)
 
 fit <- prodlim::prodlim(formula=Surv(time,status)~1,data=vdata,reverse=TRUE)
 
@@ -863,13 +896,12 @@ predict(fit,newdata=vdata,times=seq.int(0,5,0.1),level.chaos=1,mode="matrix",typ
 
 Again if status == 2, they are converted into NA. Status has to be modified to be binary even if we have competing risks.
 
-If we change two of the parameters then we get the same as the custom formula censor.probability, reverse=FALSE, status=censor.status:
+If we change two of the parameters then we get the same as the custom formula censor.probability, reverse=FALSE, status=censor.status. 
+The result is equal to estimating the survival probability and not the censoring probabilties.
 
 ```{r}
-#ipcw.marginal modified to explain what is changed. 
-
+# Checking what happens if reverse is set to FALSE
 fit <- prodlim::prodlim(formula=Surv(time,censor.status)~1,data=vdata,reverse=FALSE)
-
 predict(fit,newdata=vdata,times=seq.int(0,5,0.1),level.chaos=1,mode="matrix",type="surv")
 
 ```
@@ -906,26 +938,23 @@ https://rdrr.io/cran/pec/src/R/ipcw.R
 
 This approach only works with a binary event status (0 for censored, 1 for any event) and does not handle multiple competing risks for censoring probability estimation.
 
-**The censoring probability represents the likelihood that a patient remains uncensored (i.e., continues to be observed) up to a given time t. This probability helps us adjust for patients who are lost to follow-up or have reached the study’s end without experiencing an event**
+##### Conclusion
 
-The difference with survival is the following:
+When we need to calculate Inverse Probability of Censoring Weight (IPCW), firstly we need to compute the censoring distribution, which is not the survival probabilities. To calculate the censoring probability, we can use prodlim, used in other packages such as pec or riskRegression. In prodlim we need to set reverse = TRUE when censoring is 0 and any event as 1. Alternatively, we can set the reverse to FALSE, and reverse our status to censoring 1 and any event as 0.  
+The reverse Kaplan-Meier approach (reverse=TRUE) only works if we do not differentiate between different causes of death), with the focus on if a patient was observed up to a given time or not.
 
-1) Survival Probability is specifically about avoiding the event of interest (e.g., death from colorectal cancer).
+In order to calculate IPCW, the inverse of censoring probabilities is computed. 
 
-2) Censoring Probability is about remaining observable up to a certain time; it’s about the likelihood that the patient stays in the study and is not "lost" for other reasons.
+As it is nicely put in the following package: https://github.com/soda-inria/hazardous/blob/main/hazardous/_ipcw.py#L55
 
-These probabilities are different because censoring and the event of interest are often independent in survival analysis.
+"The term 'IPCW' can be somewhat misleading: IPCW values represent the inverse of the probability of remaining censor-free (or uncensored) at a given time. For instance, at t=0, the probability of being censored is 0, so the probability of being uncensored is 1.0, and its inverse is also 1.0.
 
-In other words:
-Censoring Probability: This is the likelihood that a patient remains observable in the study up to a certain time point. It is unrelated to whether they experience the event of interest (i.e death from colorectal cancer).
+By construction, IPCW values are always greater than or equal to 1.0 and can only increase over time. If no observations are censored, the IPCW values remain uniformly at 1.0.
 
-Instead, it is related to:
-1) Administrative censoring (when the study ends while the patient is still alive and has not experienced the event),
-2) Loss to follow-up (when the patient stops participating in the study for any reason unrelated to the event of interest).
+Note: This estimator extrapolates by maintaining a constant value equal to the last observed IPCW value beyond the last recorded time point."
 
-So, censoring probability addresses whether a patient is censored (lost to follow-up or administratively censored) versus continuing to be observed. It does not measure survival from the event but rather the likelihood that the patient status (event or no event) can still be observed.
 
-When we calculate metrics like the Inverse Probability of Censoring Weight (IPCW), we use the censoring probability. To calculate the censoring probability, we set reverse = TRUE in prodlim, treating censoring as the “event.” This reverse Kaplan-Meier approach only works if we do not differentiate between different causes of death), with the focus on if a patient was observed up to a given time or not.
+##### Additional notes
 
 Given the reverse KM with prodlim, the drop out from the study is quite low, and would suggest that the censoring happens early. 
 
@@ -943,20 +972,16 @@ boxplot(censored_data$time)
 
 There is then a small drop at the start, and the first quantile is already at the end of the study. Thus, this data distribution supports the earlier interpretation: ~1% of participants were censored early, explaining the initial drop. ~99% of participants remained in the study (or were censored at the end), and after we have a stable censoring probability of around 0.98 after the initial period.
 
-As it is nicely put in the following package: https://github.com/soda-inria/hazardous/blob/main/hazardous/_ipcw.py#L55
 
-"The term 'IPCW' can be somewhat misleading: IPCW values represent the inverse of the probability of remaining censor-free (or uncensored) at a given time. For instance, at t=0, the probability of being censored is 0, so the probability of being uncensored is 1.0, and its inverse is also 1.0.
-
-By construction, IPCW values are always greater than or equal to 1.0 and can only increase over time. If no observations are censored, the IPCW values remain uniformly at 1.0.
-
-Note: This estimator extrapolates by maintaining a constant value equal to the last observed IPCW value beyond the last recorded time point."
+##### Custom functions
 
 ```{r}
+# Censor probabilities at specific time points
 censor.prob.KM(time=vdata$time, status=vdata$status, cens.code=0)
 ```
 
 ```{r}
-
+# Censoring probabilities at subjects times
 censor.prob.KM.individual(time=vdata$time, status=vdata$status, cens.code=0, predictions=pred)
 
 ```
