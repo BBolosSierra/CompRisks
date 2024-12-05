@@ -3,6 +3,7 @@
 #' 
 #' Ref: https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/s12874-022-01679-6
 #' Ref: https://square.github.io/pysurvival/metrics/brier_score.html
+#' Ref: https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
 #'
 #' Weighted overall prediction error, is a measure of the mean squared error between predicted probabilities and actual outcomes, 
 #' adjusted for censoring using Inverse Probability of Censoring Weights (IPCW) 
@@ -89,34 +90,35 @@ WeightedBrierScore <- function(predictions,
       # Handle weights and residuals considering competing risks
       if (status[i] == cause && time[i] <= tau) {
         # Case 1: Event of interest occurs before tau
-        W[i] <- 1 / G1
+        # W[i] <- 1 / G1
+        # Where the true outcome is 1, therefore penalizing far from 1 predictions
         residuals[i] <- (1 - predictions[i])^2 / G1
       } else if (status[i] != cause && status[i] != cens.code && time[i] <= tau) {
         # Case 2: Competing risks before tau
-        W[i] <- 1 / G1
+        # W[i] <- 1 / G1
         residuals[i] <- (predictions[i]^2) / G1
       } else if (status[i] == cens.code && time[i] <= tau) {
         # Case 3: Censored before tau
-        W[i] <- 0
+        # W[i] <- 0
         residuals[i] <- 0
       } else if (time[i] > tau) {
         # Case 4: Event or censoring after tau
-        W[i] <- 1 / G2
+        # W[i] <- 1 / G2
         residuals[i] <- (predictions[i]^2) / G2
       }
     } else {
       # Handle weights and residuals ignoring competing risks
       if (time[i] <= tau && status[i] == cause) {
         # Case 1: Event occurs before tau
-        W[i] <- 1 / G1
+        # W[i] <- 1 / G1
         residuals[i] <- (1 - predictions[i])^2 / G1
       } else if (time[i] <= tau && status[i] == cens.code) {
         # Case 2: Censored before tau
-        W[i] <- 0
+        # W[i] <- 0
         residuals[i] <- 0
       } else if (time[i] > tau) {
         # Case 3: Event or censoring after tau
-        W[i] <- 1 / G2
+        # W[i] <- 1 / G2
         residuals[i] <- (predictions[i]^2) / G2
       }
     }

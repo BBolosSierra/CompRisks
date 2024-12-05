@@ -50,13 +50,13 @@ IntegratedBrierScore <- function(prediction_matrix,
     tau <- taus[j]
     predictions <- prediction_matrix[,j] 
     # Calculate Weighted Brier Score
-    BS_we <- WeightedBrierScore2(predictions = predictions,
+    BS_we <- WeightedBrierScore(predictions = predictions,
                        tau = tau,
                        time =  time,
                        status = status,
                        cause = cause, 
                        cens.code = cens.code, 
-                       cmprsk = cmprsk)
+                       cmprsk = cmprsk)$weighted.brier.score
     # Store value 
     bs[j] <- BS_we
   }

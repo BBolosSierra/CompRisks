@@ -202,7 +202,7 @@ vboot <- vboot |> mutate(
 ```
 
 
-Since we want to move from the Score function in RiskRegression, we can have our own definition of Brier Score:
+Since we want to move from the Score function in RiskRegression or pec, we can have our own definition of Brier Score:
 
 ```{r}
 ## like Brier.binary in riskRegression
@@ -327,8 +327,7 @@ There is two implementations of the Weighted Brier Score:
 ```{r}
 # As previously described in the formulas above
 source("CompRisksMetrics/WeightedBrierScore.R")
-# More like riskregression set up from https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
-source("CompRisksMetrics/WeightedBrierScore2.R")
+
 ```
 
 
@@ -336,19 +335,6 @@ source("CompRisksMetrics/WeightedBrierScore2.R")
 # Valid for non-competing risks and censoring cases
 # Extension of BinaryBrierScore
 WeightedBrierScore(predictions=pred, 
-            time = vdata$time, 
-            status = vdata$status,
-            cause = primary_event,
-            tau = horizon, 
-            cens.code = 0, 
-            cmprsk=FALSE)
-```
-
-Simplification inspired in riskRegression and https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
-
-```{r}
-## Using individual censoring weights formula
-WeightedBrierScore2(predictions=pred, 
             time = vdata$time, 
             status = vdata$status,
             cause = primary_event,
@@ -386,20 +372,6 @@ WeightedBrierScore(predictions=pred,
 ```
 
 
-Simplification: https://onlinelibrary.wiley.com/doi/epdf/10.1002/bimj.200610301
-
-
-```{r}
-# Weighted version of brier score
-# Valid for competing risks when censoring:
-WeightedBrierScore2(predictions=pred, 
-            time = vdata$time, 
-            status = vdata$status,
-            cause = primary_event,
-            tau = horizon, 
-            cens.code = 0, 
-            cmprsk = TRUE)
-```
 
 
 We get the same result as in riskRegression. 
@@ -511,19 +483,6 @@ ScaledBrierScore(predictions = pred,
                  cmprsk = TRUE)
 ```
 
-With the second implementation:
-
-```{r}
-ScaledBrierScore2(predictions = pred,
-                 predictions_null = pred_null,
-                 tau=5,
-                 time=vdata$time,
-                 status=vdata$status,
-                 cause=primary_event, 
-                 cens.code = 0, 
-                 cmprsk = TRUE)
-
-```
 
 So, there is a difference with the result from riskRegression
 
@@ -667,6 +626,7 @@ IntegratedBrierScore(prediction_matrix = prediction_matrix,
                                  cens.code = 0, 
                                  cmprsk = TRUE)
 ```
+
 
 
 ### Details about censoring weights and IPCW. 
@@ -874,7 +834,7 @@ censor.prob.KM(time=vdata$time, status=vdata$status, cens.code=0)
 
 ```{r}
 
-censor.prob.KM.individual(time=vdata$time, status=vdata$status, cens.code=0)
+censor.prob.KM.individual(time=vdata$time, status=vdata$status, cens.code=0, predictions=pred)
 
 ```
 

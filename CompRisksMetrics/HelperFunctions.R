@@ -15,15 +15,10 @@ censor.prob.KM <- function(time, status, cens.code){
                          reverse=TRUE)
   # Predict weights at specific times
   prob = stats::predict(fit,
-                        times=seq(0,time.max,0.1), # switch for: unique(time) ?
+                        times=seq(0,time.max,0.1), # switch for: tmp$time ?
                         level.chaos=1,
                         mode="matrix",
                         type="surv")
-  
-  # Predict weights at subject specific times
-  #ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=1)
-  
-  #out <- list(ipcw.times=ipcw.times, ipcw.subject.times=ipcw.subject.times)
   
   out <- cbind(seq(0,time.max,0.1), prob)
   
@@ -36,32 +31,29 @@ censor.prob.KM <- function(time, status, cens.code){
 ## Using prodlim
 ## Controlling for competing risks
 ## No covariates in this function
-censor.prob.KM.individual <- function(time, status, cens.code){
-  tmp <- data.frame(time=time)
+censor.prob.KM.individual <- function(time, status, cens.code, predictions){
+  tmp <- data.frame(time=time, status=status, predictions = predictions)
   # Sets the value in status equal to cens.code to 0, the rest to 1
   # Controlling for competing risks in censoring status
   tmp$censor.status <- ifelse(status == cens.code, 0, 1) # Not handled in riskRegression with cmprsks
+  # create id 
+  rownames(tmp)<- 1:length(time)
   time.max = ceiling(max(time))
+  # We need to consider that the prodlim needs ordering 
+  tmp <- tmp[order(tmp$time),]
   # Fit prodlim, reversed non-parametric survival KM
   # Switches the censoring status to estimate censoring distribution
   fit = prodlim::prodlim(formula=Surv(time,censor.status)~1,
                          data=tmp,
                          reverse=TRUE)
-  # Predict weights at specific times
-  prob = stats::predict(fit,
-                        times=seq(0,time.max,0.1), # switch for: unique(time) ?
-                        level.chaos=1,
-                        mode="matrix",
-                        type="surv")
-  
   # Predict weights at subject specific times
-  ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=1)
+  ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=0)
   
-  #out <- list(ipcw.times=ipcw.times, ipcw.subject.times=ipcw.subject.times)
+  tmp$ipcw.subject.times <- ipcw.subject.times
   
-  out <- cbind(ipcw.subject.times)
+  #out <- out[order(out$id),]
   
-  return(out)
+  return(tmp)
 }
 
 
