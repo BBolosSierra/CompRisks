@@ -581,7 +581,24 @@ $$IBS = \int^{\tau_{max}}_{\tau_{min}} BS(\tau) d\tau$$
 Since the times of interest are discrete, the integral is numerically approximated using the trapezoidal rule. 
 
 $$IBS \approx \frac{1}{\tau_{\text{max}} - \tau_{\text{min}}} \sum_{j=1}^{K-1} \frac{\tau_{j+1} - \tau_j}{2} \cdot \left( BS(\tau_j) + BS(\tau_{j+1}) \right)$$
+```{r}
+# It can be computed like follows:
+compute_IBS <- function(taus, bs) {
 
+  # Calculate the differences in time points
+  tau_diff <- diff(taus)
+  
+  # Apply the trapezoidal rule
+  integral <- sum(tau_diff * (bs[-1] + bs[-length(bs)]) / 2)
+  
+  # Normalize by the total time range (tau)
+  tau <- max(taus) - min(taus)
+  ibs <- integral / tau
+  
+  return(ibs)
+}
+
+```
 
 ```{r}
 # Select a range for time evaluations
@@ -627,6 +644,112 @@ IntegratedBrierScore(prediction_matrix = prediction_matrix,
                                  cmprsk = TRUE)
 ```
 
+What is used in pec? 
+
+In pec it is required an specific model. IBS is calculated as the mean of weighted average scores across each time point, instead of trapezoidal rule that we use. 
+
+```{r}
+pec_ibs <- pec::pec(object= fit_csh,
+    formula= Hist(time, status_num) ~ 1,
+    data = vdata,
+    testIBS = TRUE,
+    cens.model = "marginal",
+    verbose = TRUE, cause = 1)
+
+pec_ibs
+```
+```{r}
+mean(pec_ibs$AppErr$CauseSpecificCox)
+```
+
+In our custom function, we can also get the average of weighted brier scores across time:
+
+```{r}
+custom_bs <- IntegratedBrierScore(prediction_matrix = prediction_matrix,
+                                 taus = tau_range,
+                                 time = vdata$time,
+                                 status = vdata$status,
+                                 cause = primary_event, 
+                                 cens.code = 0, 
+                                 cmprsk = TRUE)
+
+mean(custom_bs$weighted.brier.score)
+```
+
+In pec, they also use a wider range of taus of times of interest for the approximation: 
+
+```{r}
+length(pec_ibs$time)
+```
+
+
+```{r}
+length(custom_bs$taus)
+```
+
+If we re-calculate our custom function with the same time points, and just do the average:
+
+```{r}
+# Set the tau range as in pec
+tau_range = pec_ibs$time
+# Initialize array
+# Rows: individuals, Columns: time points
+prediction_matrix <- matrix(NA, 
+                           nrow = nrow(vdata), 
+                           ncol = length(tau_range))
+
+colnames(prediction_matrix) <- tau_range 
+
+# Generate a matrix with predictions
+for (j in seq_along(tau_range)){
+  tau <- tau_range[j]
+  
+  # Predicted probability calculation at each tau
+  pred <- predictRisk(fit_csh,
+    cause = primary_event,
+    newdata = vdata,
+    times = tau
+  )
+  
+  # Store the predictions in the j-th column
+  prediction_matrix[, j] <- pred
+
+}
+```
+
+```{r}
+custom_bs <- IntegratedBrierScore(prediction_matrix = prediction_matrix,
+                                 taus = tau_range,
+                                 time = vdata$time,
+                                 status = vdata$status,
+                                 cause = primary_event, 
+                                 cens.code = 0, 
+                                 cmprsk = TRUE)
+
+mean(custom_bs$weighted.brier.score)
+```
+
+It has the same result, but it takes more time.
+
+Why are they using the average and not the trapezoidal rule. The trapezoidal rule requires numerical integration and if the time points are evenly distributed across time, the average is supposed to be good enough. If the points are NOT evenly distributed across time, the trapezoidal rule is more precise. 
+
+
+```{r}
+# More efficient implmentation
+trapezoidal.integration(tau_range, custom_bs$weighted.brier.score)/(max(tau_range) - min(tau_range))
+```
+
+```{r}
+IntegratedBrierScore(prediction_matrix = prediction_matrix,
+                                 taus = tau_range,
+                                 time = vdata$time,
+                                 status = vdata$status,
+                                 cause = primary_event, 
+                                 cens.code = 0, 
+                                 cmprsk = TRUE)
+```
+
+In other packages, the trapezoidal rule is used as well: https://github.com/sebp/scikit-survival/blob/v0.23.1/sksurv/metrics.py#L639
 
 
 ### Details about censoring weights and IPCW. 

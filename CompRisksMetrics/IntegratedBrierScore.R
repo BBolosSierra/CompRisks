@@ -64,9 +64,12 @@ IntegratedBrierScore <- function(prediction_matrix,
   t.max = max(taus)
   t.min = min(taus)
   # Apply trapezoidal integration
-  ibs <- trapezoidal.integration(bs, taus)/(t.max - t.min)
+  ibs <- trapezoidal.integration(taus, bs)/(t.max - t.min)
+  # Average across time points
+  ibs_mean <- mean(bs)
   
   return(list(integrated.brier.score = ibs,
+              average.brier.score = ibs_mean,
               weighted.brier.score = bs,
               taus = taus))
 }

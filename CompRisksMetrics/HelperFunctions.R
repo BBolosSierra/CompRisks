@@ -50,14 +50,12 @@ censor.prob.KM.individual <- function(time, status, cens.code, predictions){
   ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=0)
   
   tmp$ipcw.subject.times <- ipcw.subject.times
-  
-  #out <- out[order(out$id),]
-  
+   
   return(tmp)
 }
 
-
-# For integrated Brier score
+# Effective computation of trapezoidal rule for numerical integration 
+# of brier scores across time points of interes
 trapezoidal.integration <- function(x, y) {
   if (length(x) != length(y)) stop("x and y must have the same length")
   sum(diff(x) * (head(y, -1) + tail(y, -1)) / 2)
