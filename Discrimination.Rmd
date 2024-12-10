@@ -184,6 +184,11 @@ score_vdata <- Score(
 ```
 
 
+```{r}
+C_vdata
+```
+
+
 ## Concodance index
 
 The c index ranges from 0.5 (no discriminating ability) to 1.0 (perfect ability to discriminate between patients with different outcomes).
@@ -217,6 +222,268 @@ CIndexCRisks(predictions=pred,
                           cause= primary_event, 
                           tau=horizon,
                           method = "cifs")
+```
+
+
+```{r}
+C_vdata
+```
+
+We get a different result. Why??
+
+
+In pec: 
+
+https://github.com/cran/pec/blob/master/src/cindex.c
+
+With the defaults (tiedPredictionsIn = TRUE, tiedOutcomeIn = TRUE, tiedMatchIn = TRUE):
+
+1. Pairs with identical predictions are included as default, tiedPredictionsIn = TRUE. If tiedPredictionsIn = FALSE, the pairs with identical predictions are then excluded. Unless their event times are tied AND tiedMatchId is set to TRUE, in that case, they are concordant.
+
+2. Pairs with identical uncensored event times are included as default, tiedOutcomeIn = TRUE. If tiedOutcomeIn is set to FALSE, they are excluded unless their predictions are tied AND tiedMatchIn is set to TRUE, in that case, they will be considered concordant. 
+
+
+##### In detail
+
+$Y[i] \leq Y[j]$: Subject i  has an earlier or equal event time.
+
+\text{status}[i] = 1: Subject i  is uncensored.
+w_i > 0 \quad \text{and} \quad w_j > 0 : Pair weights are positive.
+
+\text{pred}[i] < \text{pred}[j] : Predicted risks are concordant.
+
+\textbf{Tied Predictions}: \text{pred}[i] = \text{pred}[j] : Half concordance if \texttt{tiedpredIn = TRUE}.
+
+\textbf{Tied Outcomes}: Y[i] = Y[j] : Pair is included if \texttt{tiedoutcomeIn = TRUE}.
+
+\textbf{Fully Tied Pairs}:
+$Y[i] = Y[j]$ \quad \text{and} \quad \text{pred}[i] = \text{pred}[j]: Fully concordant if \texttt{tiedmatchIn = TRUE}.
+
+
+In pec censoring weights are also included:
+
+```{r}
+
+tmp <- vdata
+tmp$censor.status <- ifelse(tmp$status %in% c(1, 2), 1, 0)
+
+tmp <- tmp[order(tmp$time),]
+
+weight.i <- pec::ipcw(formula=Surv(time,censor.status)~1,
+                 data=tmp,
+                 method="marginal",
+                 times=unique(tmp$time),
+                 subjectTimes=tmp$time, 
+                 what = "IPCW.subjectTimes")$IPCW.subjectTimes
+weight.j <- pec::ipcw(formula=Surv(time,censor.status)~1,
+                 data=tmp,
+                 method="marginal",
+                 times=unique(tmp$time),
+                 subjectTimes=tmp$time,
+                 subjectTimesLag=0,
+                 what="IPCW.times")$IPCW.times
+
+
+```
+
+```{r}
+length(weight.i)
+length(weight.j)
+```
+
+
+
+### Custom functions for ipcw
+
+```{r}
+## Calculate the censoring probabilities
+## Using prodlim
+## Controlling for competing risks
+## No covariates in this function
+test.censor.prob.KM <- function(time, status, cens.code){
+  tmp <- data.frame(time=time, status = status)
+  # Sets the value in status equal to cens.code to 0, the rest to 1
+  # Controlling for competing risks in censoring status
+  tmp$censor.status <- ifelse(status == cens.code, 0, 1) # Not handled in riskRegression with cmprsks
+  # Order it by time
+  #tmp <- tmp[order(tmp$time),]
+  # Fit prodlim, reversed non-parametric survival KM
+  # Switches the censoring status to estimate censoring distribution
+  fit = prodlim::prodlim(formula=Surv(time,censor.status)~1,
+                         data=tmp,
+                         reverse=TRUE)
+  # Predict weights at specific times
+  weights = stats::predict(fit,
+                           times=unique(tmp$time), 
+                           level.chaos=1,
+                           mode="matrix",
+                           type="surv")
+  
+  out <- data.frame(cbind(unique.times=unique(tmp$time), ipcw.times=weights))
+  
+  return(out)
+}
+
+## Calculate the censoring probabilities
+## Using prodlim
+## Controlling for competing risks
+## No covariates in this function
+test.censor.prob.KM.individual <- function(time, status, cens.code, predictions, lag){
+  tmp <- data.frame(time=time, status=status, predictions = predictions)
+  # Sets the value in status equal to cens.code to 0, the rest to 1
+  # Controlling for competing risks in censoring status
+  tmp$censor.status <- ifelse(status == cens.code, 0, 1) # Not handled in riskRegression with cmprsks
+  # We need to consider that the prodlim needs ordering 
+  tmp <- tmp[order(tmp$time),]
+  # Fit prodlim, reversed non-parametric survival KM
+  # Switches the censoring status to estimate censoring distribution
+  fit = prodlim::prodlim(formula=Surv(time,censor.status)~1,
+                         data=tmp,
+                         reverse=TRUE)
+  # Predict weights at subject specific times
+  ipcw.subject.times = prodlim::predictSurvIndividual(fit,lag=lag)
+  
+  tmp$ipcw.subject.times <- ipcw.subject.times
+  
+  return(tmp)
+}
+```
+
+```{r}
+# Censoring probabilities at subjects times
+cwi <- test.censor.prob.KM.individual(time=vdata$time, status=vdata$status, cens.code=0, predictions=pred, lag=1)
+dim(cwi)
+```
+
+```{r}
+# Censor probabilities at specific time points
+cwj <- test.censor.prob.KM(time=vdata$time, status=vdata$status, cens.code=0)
+dim(cwj)
+```
+
+
+Are we getting the same results?
+
+```{r}
+identical(cwi$ipcw.subject.times, weight.i) 
+```
+
+```{r}
+identical(cwj$ipcw.times, weight.j)
+```
+
+
+### Including ties and IPCW
+
+Therefore we need to include IPCW and similar logic for ties:
+
+
+```{r}
+CIndexCRisks2 <- function(predictions, 
+                         time,
+                         cens.code, 
+                         status, 
+                         cause, 
+                         tau,
+                         ipcw,
+                         method=c("survival","cifs")){
+  
+  method = match.arg(method)
+  
+  censor.status <- ifelse(status == cens.code, 0, 1)
+  
+  
+  if( method=="survival" ){ predictions=1-predictions; }
+  
+  n = length(predictions)
+  A = matrix(0, nrow=n, ncol=n)
+  B = matrix(0, nrow=n, ncol=n)
+  Q = matrix(0, nrow=n, ncol=n) 
+  N_t = matrix(0, nrow=n, ncol=n)
+  Num_mat = matrix(0, nrow=n, ncol=n)
+  Den_mat = matrix(0, nrow=n, ncol=n)
+  
+  Num=0
+  Den=0
+  for (i in  1:n){
+    # Identify usable pairs based on time
+    A[i, which(time[i] <= time)] = 1 
+    B[i, intersect(intersect(which((time[i] > time)),
+                             which(status!=cause)), which(censor.status==1))] = 1
+    #B[i, intersect(intersect(which((time[i] >= time)),
+    #                         which(status!=cause)), which(censor.status==1))] = 1
+    # Include pairs tied in uncensored event times
+    B[i, which(time[i] == time & status == cause & censor.status == 1)] = 1
+    # Compare predictions. Including ties. 
+    #Q[i, which(predictions[i] >= predictions)] = 1
+    Q[i, which(predictions[i] >= predictions)] = 1
+  }
+  
+  for (i in 1:n){
+    if(time[i]<=tau && status[i]==cause && censor.status[i]==1){
+      N_t[i,] = 1
+    }
+  }
+  
+  # Compute numerator and denominator matrices with IPCW weights
+  for (i in 1:n) {
+    for (j in 1:n) {
+      if (i != j) {
+        Num_mat[i, j] <- (A[i, j] + B[i, j]) * Q[i, j] * N_t[i, j] * ipcw[i] * ipcw[j]
+        Den_mat[i, j] <- (A[i, j] + B[i, j]) * N_t[i, j] * ipcw[i] * ipcw[j]
+      }
+    }
+  }
+  
+  #Num_mat = (A+B)*Q*N_t
+  #Den_mat = (A+B)*N_t
+  
+  Num = sum(Num_mat)
+  Den = sum(Den_mat)
+  
+  return(Num/Den)
+  
+}
+```
+
+
+
+```{r}
+#source("CompRisksMetrics/ConcordanceIndex2.R") 
+
+weight.i <- pec::ipcw(formula=
+                        Surv(time,censor.status)~1,
+                 data=tmp,
+                 method="marginal",
+                 times=unique(tmp$time),
+                 subjectTimes=tmp$time, 
+                 what = "IPCW.subjectTimes")$IPCW.subjectTimes
+
+tmp$ipcw_subject_times <- weight.i
+
+
+# Predicted risk estimation
+tmp_pred <- riskRegression::predictRisk(fit_csh,
+  cause = primary_event,
+  times = horizon,
+  newdata = tmp
+)
+
+
+CIndexCRisks2(predictions=tmp_pred,
+                          time = tmp$time,
+                          cens.code = 0,
+                          status=tmp$status,
+                          cause= primary_event,
+                          ipcw = tmp$ipcw_subject_times,
+                          tau=horizon,
+                          method = "cifs")
+
+```
+
+
+```{r}
+C_vdata
 ```
 
 ```{r}

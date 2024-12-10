@@ -1,0 +1,594 @@
+# Metrics for survival analysis. 
+
+The problem with the R packages to calculate metrics is that they are dependent on R packages to calculate survival. For instance, if metrics such calibration or brier score need to be calculated, the model fit to the data must be an object of a riskregression class, to be able to use Score function that calculates the metrics. That limitis the models that can be fit. 
+
+The goal of these markdowns is to demostrate that we could calculate metrics from the cumulative incidence predictions of any model, without relying on riskRegression. 
+
+```{r}
+library(survival)
+library(riskRegression)
+library(prodlim)
+library(ggplot2)
+library(geepack)
+library(dplyr)
+library(tidyr)
+```
+
+
+We will follow: https://www.bmj.com/content/377/bmj-2021-069249
+
+https://github.com/survival-lumc/ValidationCompRisks/blob/main/Prediction_CSC.md
+
+
+```{r}
+# Create a directory to store downloaded data
+if (!dir.exists("LumcData")) {
+  dir.create("LumcData")
+}
+
+# Fix paths
+file_urls <- c(
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/rdata.rds",
+  "https://raw.githubusercontent.com/survival-lumc/ValidationCompRisks/main/Data/vdata.rds"
+)
+
+# Download files
+for (url in file_urls) {
+  file_name <- basename(url) # Extract the file name from the URL
+  if (!file.exists("LumcData/rdata.rds") || !file.exists("LumcData/vdata.rds")) {
+    message("Downloading data")
+    download.file(url, destfile = file.path("LumcData", file_name), method = "libcurl")
+  } else {
+    message("Data is already downloaded")
+  }
+}
+
+# Check if the files are downloaded
+list.files("LumcData")
+
+
+```
+
+```{r}
+# Import data ------------------
+rdata <- readRDS("LumcData/rdata.rds")
+vdata <- readRDS("LumcData/vdata.rds")
+
+rdata$hr_status <- relevel(rdata$hr_status, ref = "ER and/or PR +")
+vdata$hr_status <- relevel(vdata$hr_status, ref = "ER and/or PR +")
+
+rdata$status <- rdata$status_num
+vdata$status <- vdata$status_num
+```
+
+## Calibration
+
+Calibration refers to the agreement between observed outcome proportions and risk estimates from the prediction model. For example, if the model predicted a 30% absolute risk of colorectal cancer recurrence by three years on average. This implies that if the model is well calibrated on average, we expect to observe a recurrence event in about 30% of the patients in the validation set within three years. Ideally, calibration is not only adequate on average (known as calibration in the large), but predictions should be accurate at every level of risk, from the lowest to the highest. For instance, if a model predicts a 20% risk for some individuals and an 80% risk for others, the observed outcomes for both groups should correspond closely to these predicted risks, not just the overall average across all predictions.
+
+We can use the same as in the paper we are focussing on. To be sure we are getting the same results as with RiskRegression.
+
+First we train any model and compute the predictions. 
+
+```{r}
+fit_csh <- CSC(Hist(time, status) ~
+age + size +
+  ncat + hr_status,
+data = rdata
+)
+
+# useful objects
+cause <- 1 # Set to 2 if cause 2 was of interest
+tau <- 5 # Set time horizon for prediction (here 5 years)
+
+# Predicted risk estimation
+pred <- predictRisk(fit_csh,
+  cause = cause,
+  times = tau,
+  newdata = vdata
+)
+
+```
+
+
+### Calibration plot 
+
+When constructing the calibration curve, you can group individuals based on Risk Estimates, which involves dividing individuals into groups (often deciles) based on their predicted risk (CIFs). Within each group, the observed outcome proportion is estimated (it is the observed cumulative incidence) and it is ploted against the average predicted risk for that group. 
+
+However, it is arbitrarily categorizing individuals and lead to a loss of information. Therefore it is suggested to use alternative methods that smooth the curve such 1) Pseudo-observations 2) Flexible regression approach.
+
+The smoothed curve should only be plotted over the range of observed risks and not extrapolated beyond.
+
+#### Calibration plot using pseudo-observations (LOESS smoothing)
+(Seems to need a specific time-point)
+
+One way is to use pseudo-observations (U). Pseudo-observation approximate the individual contribution to the overall CIF estimate by using leave-one-out approach. First, the CIF is estimated for all the individuals at a given time point. Then, the estimate is recalculated removing one individual at a time. These estimations are based on non-parametric calculation of the CIF (Aalen Johansen estimator). 
+
+It is a technique that allow to handle censoring and competing risks data by creating proxy estimate for all the individuals.
+
+$$U_{i}(\tau, k) = n \hat{CIF}_{k}(\tau) - (n-1)\hat{CIF}_{k}^{(-i)}(\tau)$$
+
+```{r}
+source("CompRisksMetrics/CalibrationPlot.R")
+```
+
+
+```{r}
+result <- CalibrationPlot(predictions = pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "pseudovalues",
+                                 bandwidth = 0.05,
+                                 graph = TRUE
+                                 )
+
+```
+
+```{r}
+print(result$graph)
+```
+
+
+
+```{r}
+result <- CalibrationPlot(predictions = pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "quantiles",
+                                 quantiles=10,
+                                 graph = TRUE
+                                 )
+print(result$graph)
+```
+
+```{r}
+result <- CalibrationPlot(predictions = pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "subdistribution",
+                                 n.knots = 5,
+                                 graph = TRUE
+                                 )
+print(result$graph)
+```
+
+
+### Numerical summaries of calibration 
+
+ICI - Integrated Calibration Index - The ICI is the mean absolute difference between the predicted and observed cumulative incidence function (CIF). It represents the average calibration error. A lower ICI value indicates better calibration, meaning the predicted CIFs are closer to the observed CIFs on average. A 0 means perfect alignment between observed and predicted. 
+
+E50 (50th Percentile of Absolute Error) - median absolute error between the predicted and observed CIFs. A lower E50 would mean that the error (middle value of the error) is small. 0, indicating that for 50% of the individuals, the predicted CIFs closely match the observed CIFs.
+
+E90 (90th Percentile of Absolute Error) - This gives an idea of how large errors (the upper 10%) behave. A lower value indicates that even larger errors tend to be small.
+
+Emax (Maximum Absolute Error) - how far off the worst-case prediction is from the observed data. A lower value indicates that the model does not have any extreme miscalibrations
+
+RMSE - overall prediction error by taking the square root of the mean of squared differences between predicted and observed CIFs. It penalizes larger errors more heavily than smaller ones due to the squaring of errors. 
+
+```{r}
+source("CompRisksMetrics/CalibrationNumericalMeasures.R")
+```
+
+
+```{r}
+result <- CalibrationNumericalMeasures(predictions = pred,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=5, 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "pseudovalues",
+                                 bandwidth = 0.05
+                                 )
+```
+
+```{r}
+result$calibr.measures
+
+```
+
+
+```{r}
+
+boxplot(result$error)
+
+points(result$calibr.measures[["ICI"]], col = "blue", pch = 19, cex = 1.2)  # Mean as a blue dot
+points(result$calibr.measures[["E50"]], col = "yellow", pch = 19, cex = 1.2)  # Median as a red dot
+points(result$calibr.measures[["E90"]], col = "purple", pch = 19, cex = 1.2)  # 90th quantile as a purple dot
+points(result$calibr.measures[["Emax"]], col = "brown", pch = 19, cex = 1.2)  # Max value as a green dot
+```
+
+### Numerical measures for multiple time points:
+
+```{r}
+taus <- c(1,3,5) 
+
+# Predicted risk estimation
+preds <- predictRisk(fit_csh,
+  cause = cause,
+  times = taus,
+  newdata = vdata
+)
+```
+
+
+```{r}
+source("CompRisksMetrics/CalibrationNumericalMeasuresMTimes.R")
+```
+
+
+```{r}
+result <- CalibrationNumericalMeasuresMTimes(predictions = preds,
+                                 data=vdata, 
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=c(1,3,5), 
+                                 cause=1, 
+                                 cens.code=0,
+                                 predictions.type = "CIF",
+                                 method = "pseudovalues"
+                                 )
+
+str(result)
+```
+
+
+```{r}
+# Prepare data for the boxplot
+error_data <- data.frame(
+  Time = rep(1:3, each = length(result$error[[1]])),
+  Error = unlist(result$error),
+  Group = rep(c("error1", "error2", "error3"), each = length(result$error[[1]]))
+)
+
+# Prepare data for the line plot of calibration measures
+calib_data <- bind_rows(
+  lapply(1:3, function(i) {
+    calib <- result$calibr.measures[[i]]
+    data.frame(
+      Group = paste0("error",i),
+      ICI = calib[["ICI"]],
+      E50 = calib[["E50"]],
+      E90 = calib[["E90"]],
+      Emax = calib[["Emax"]]
+    )
+  }), .id = "TimePoint"
+) %>% pivot_longer(cols = ICI:Emax, names_to = "Measure", values_to = "Value")
+
+# Plot boxplot for errors
+p <- ggplot(error_data, aes(x = factor(Time), y = Error, fill = Group)) +
+  geom_boxplot() +
+  labs(title = "Error by Time Point with Calibration Measures", x = "Time Point", y = "Error") +
+  theme_minimal()
+
+# Add line plot for calibration measures, ensuring Time is correctly mapped
+p + geom_line(data = calib_data, aes(x = factor(TimePoint), y = Value, color = Measure, group = Measure), size = 1) +
+  scale_color_manual(values = c("orange", "purple", "blue", "brown")) +
+  guides(fill = guide_legend(title = "Error Group"), color = guide_legend(title = "Calibration Measure"))
+
+```
+
+
+Modify so that the time points are the real times at evaluation. 
+
+
+
+## Prediction error 
+
+### Brier Score and Weighted Brier Score
+
+How close are estimated risks to the observed primary event indicators? Brier score is the average squared difference between estimated risks and primary event indicators. 
+
+In this form, we can utilize this function when we have a binary outcome:
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^{N}(\hat{y}_{i}(\tau)-y_{i}({\tau}))^2$$
+
+$\hat{y}$ or $f(\tau)$ is the predicted probability of the event at time for individual i and y is the event outcome is the actual event outcome (1 if the event occurred, 0 if it did not).
+
+The weighted Brier score includes one more parameter to account for censoring:
+
+$$BS(\tau) = \frac{1}{N} \sum_{i=1}^{N}w_{i}(\tau)(\hat{y}_{i}({\tau}) - y_{i}(\tau))^2$$
+
+$wi(\tau)$ is the inverse probability of censoring weights (IPCW), used to adjust for censored individuals. The IPCW method assigns a weight to each individual based on the probability that they were not censored by time $\tau$.
+
+
+#### Result with riskRegression
+
+```{r}
+# Validation data
+score_vdata <- Score(
+  list("csh_validation" = fit_csh),
+  formula = Hist(time, status_num) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = tau,
+  metrics = c("auc", "brier"),
+  summary = c("ipa"),
+  cause = cause,
+  plots = "calibration"
+)
+
+score_vdata$Brier$score
+```
+
+#### Custom function
+
+```{r}
+source("CompRisksMetrics/HelperFunctions.R")
+source("CompRisksMetrics/WeightedBrierScore.R")
+```
+
+```{r}
+WeightedBrierScore(predictions = pred,
+                                 time=vdata$time, 
+                                 status=vdata$status, 
+                                 tau=tau, 
+                                 cause=1, 
+                                 cens.code=0, 
+                                 cmprsk = TRUE)
+```
+
+
+### Scaled Brier Score
+
+The scaled Brier score is a normalized version of the Brier score that helps to interpret the predictive performance of a model relative to a baseline model, often the null model. The scaling typically places the Brier score in a range between 0 and 1, where 1 represents perfect prediction and 0 represents no improvement over the null model. 
+
+
+$$BS_{sc}(\tau) = 1- \frac{BS(\tau)}{BS(\tau)^\text{Null}} $$
+
+$BS(\tau)$ - Brier Score is the Brier score of the model being evaluated.
+
+$BS^{Null}(\tau)$ - no covariates - Brier score of a baseline or null model, which predicts the same probability for all individuals, usually equal to the overall event rate (i.e., the proportion of individuals experiencing the event of interest) - Can be computed with the Aalen johansen estimator.
+
+$$BS(\tau)^\text{Null} = \frac{1}{N} \sum_{i=1}^{N} W_i(\tau) \cdot \left( D_i(\tau) - f_{i}^\text{Null}(\tau) \right)^2$$
+
+$f^\text{Null}(\tau)$ is the same for all individuals, as it is derived purely from population-level probabilities at time $\tau$
+
+The evaluated model should ideally provide better predictions by incorporating individual-specific covariates, leading to a lower Brier Score.
+
+```{r}
+## Result of riskRegression
+score_vdata$Brier$score
+```
+
+#### Custom function
+
+```{r}
+source("CompRisksMetrics/ScaledBrierScore.R")
+```
+
+```{r}
+
+# Aalen-Johansen estimator on training data
+aj_fit <- prodlim::prodlim(Hist(time, status) ~ 1, data = vdata, reverse = FALSE)
+
+# Predict CIF for new data
+cif_tau <- stats::predict(aj_fit, 
+                    times = 5, 
+                    newdata = vdata, 
+                    cause = cause, 
+                    type = "cuminc")
+
+ScaledBrierScore(predictions = pred,
+                 predictions_null = cif_tau,
+                 time=vdata$time, 
+                 status=vdata$status, 
+                 tau=tau, 
+                 cause=1, 
+                 cens.code=0, 
+                 cmprsk = TRUE)
+```
+
+percentage.scaled.brier.score, can be understood as the percentage of improvement of the evaluated model with respect to the null. 
+
+
+#### Integrated brier score. 
+
+The Integrated Brier Score (IBS) provides an overall measure of model performance across all time points. A lower IBS indicates better predictive performance across the entire follow-up period. It accounts for both early and late prediction accuracy, balancing errors over time.
+
+It is calculated from the weighted Brier Score at each of the evaluation times $\tau$
+
+
+$$IBS = \int^{\tau_{max}}_{\tau_{min}} BS(\tau) d\tau$$
+Since the times of interest are discrete, the integral is numerically approximated using the trapezoidal rule. 
+
+$$IBS \approx \frac{1}{\tau_{\text{max}} - \tau_{\text{min}}} \sum_{j=1}^{K-1} \frac{\tau_{j+1} - \tau_j}{2} \cdot \left( BS(\tau_j) + BS(\tau_{j+1}) \right)$$
+
+```{r}
+source("CompRisksMetrics/IntegratedBrierScore.R")
+```
+
+
+```{r}
+# Select a range for time evaluations
+tau_range = seq(0,5,0.1)
+# Initialize array
+# Rows: individuals, Columns: time points
+prediction_matrix <- matrix(NA, 
+                           nrow = nrow(vdata), 
+                           ncol = length(tau_range))
+
+colnames(prediction_matrix) <- tau_range 
+
+# Generate a matrix with predictions
+for (j in seq_along(tau_range)){
+  tau <- tau_range[j]
+  
+  # Predicted probability calculation at each tau
+  pred <- predictRisk(fit_csh,
+    cause = cause,
+    newdata = vdata,
+    times = tau
+  )
+  
+  # Store the predictions in the j-th column
+  prediction_matrix[, j] <- pred
+
+}
+
+# Run the custom function
+IntegratedBrierScore(prediction_matrix = prediction_matrix,
+                                 taus = tau_range,
+                                 time = vdata$time,
+                                 status = vdata$status,
+                                 cause = cause, 
+                                 cens.code = 0, 
+                                 cmprsk = TRUE)
+```
+## Discrimination
+
+#### Concordance index
+
+The c index ranges from 0.5 (no discriminating ability) to 1.0 (perfect ability to discriminate between patients with different outcomes).
+
+Time-dependent Concordance Index (C(t)) for competing risks focuses on comparing the relative ordering of risks assigned by the model for individuals experiencing the event of interest at or before a specific time tau.
+
+```{r}
+# C-index
+# Development set (Apparent validation)
+
+C_rdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = cause,
+  eval.times = tau,
+  data = rdata
+)$AppCindex$CauseSpecificCox
+
+# Validation set
+C_vdata <- pec::cindex(
+  object = fit_csh,
+  formula = Hist(time, status_num) ~ 1,
+  cause = cause,
+  eval.times = tau,
+  data = vdata
+)$AppCindex$CauseSpecificCox
+
+```
+
+
+```{r}
+C_vdata
+```
+
+#### Custom function 
+
+A and B account for the number of risk order pairs.
+  
+A == risk ordering of patients, small time means patient 'i' at higher risk than patient 'j' experiencing event of interest 
+  
+B == risk ordering of patients, large time for patient 'i' means lower risk than patient 'j' if not experienced the event of interest.
+  
+Q == the risk ordering of the subjects, i.e., is subject i assigned a higher risk by the model than the subject j, for event Ek until time t.
+  
+N_t == number of subjects with survival time < time point and experience event of interest
+  
+$$C_k(\tau) = \frac{\sum_{i=1}^N \sum_{j=1}^N (A_{ij} + B_{ij}) \cdot Q_{ij} \cdot N_i^k(\tau)}{\sum_{i=1}^N \sum_{j=1}^N (A_{ij} + B_{ij}) \cdot N_i^k(\tau)}$$
+
+```{r}
+source("CompRisksMetrics/ConcordanceIndex.R") 
+```
+
+```{r}
+CIndexCRisks(predictions=pred,
+                          time = vdata$time,
+                          cens.code = 0,
+                          status=vdata$status,
+                          cause= cause, 
+                          tau=tau,
+                          method = "cifs")
+```
+
+Need to check for ties, and properly add the IPCW. 
+
+
+```{r}
+source("CompRisksMetrics/ConcordanceIndexMTimes.R") 
+
+CIndexCRisksMTimes(predictions=preds,
+                          time = vdata$time,
+                          cens.code = 0,
+                          status=vdata$status,
+                          cause= cause, 
+                          taus=taus,
+                          method = "cifs")
+```
+
+## Clinical utility
+
+Net benefit for competing risks data
+
+The benefit of a prediction model is defined as the proportion of patients who are correctly classified as high risk. 
+In the presence of competing events, this proportion can be calculated as the cumulative incidence of recurrence among patients with estimated risk ≥20%, multiplied by the proportion of all patients with risk ≥20%.
+
+The harm from using the model is defined as the proportion of patients who are incorrectly classified as high risk. With competing events, this proportion is calculated as: 1−cumulative incidence among patients with estimated risk exceeding 20% multiplied by the probability of exceeding that threshold. 
+
+Net benefit is a measure that combines both the true positives and the false positives to show the benefit of making treatment decisions based on the model's predictions. It balances the harm caused by false positives with the benefit of true positives.
+
+
+For each threshold probability (the probability above which a patient would receive treatment or an intervention), the net benefit compares:
+The benefit of treating patients who will experience recurrence (true positives).
+The cost of treating patients who will not experience recurrence (false positives).
+
+The threshold probability reflects the risk level at which a clinician would decide to intervene (e.g., offer adjuvant therapy after surgery). A higher threshold means the clinician would only intervene in patients who have a higher predicted risk of recurrence.
+
+Formulation for Net benefit (NB):
+
+$$ NB = \frac{TP - FPxf}{N}$$
+
+$$f = \frac{threshold}{1-threshold}$$
+
+TP - true positive - The number of patients correctly identified by the model as a high risk of recurrence. Meaning, they are classified as high risk, and actually have a high risk).
+
+FN - false positive - The number of patients incorrectly identified by the model as a high risk of recurrence. They are classified as high risk, but they do not actually have a high risk.
+
+
+```{r}
+source("CompRisksMetrics/ClinicalUtility.R")
+```
+
+
+```{r}
+
+tmp <- vdata
+tmp$pred <- pred
+
+dca_vdata <- stdca(
+  data = tmp,
+  outcome = "status",
+  ttoutcome = "time",
+  timepoint = tau, 
+  predictors = "pred",
+  xstop = 0.45,
+  ymin = -0.01,
+  graph = TRUE,
+  cmprsk = TRUE
+)
+```
+Interpretation:
+
+1) If the model's curve is above the "treat all" and "treat none" lines for a range of threshold probabilities, this indicates that the model is clinically useful. It leads to better decision-making (higher net benefit) than either treating everyone or treating no one.
+
+2) If the model's curve lies below the "treat all" or "treat none" lines, it indicates that using the model would result in worse decisions compared to treating everyone or no one. This could suggest poor model calibration, overestimation of recurrence, or failure to account properly for competing risks.
+
+3) The range of threshold probabilities where the model performs better than the "treat all" and "treat none" strategies is important. For instance, if clinicians are comfortable with treating patients who have a 20-30% predicted risk of recurrence, you want the model’s curve to be above the "treat all" and "treat none" lines in this range.
+
+4) "Treat All" line represents the net benefit of treating all patients, regardless of their risk prediction. If this line drops to 0 at a specific threshold, such as a 0.1 threshold, it indicates that, at that threshold, treating all patients provides no net benefit compared to not treating anyone. In other words, at a 10% threshold, treating everyone provides no net benefit because the harms of overtreatment outweigh the benefits of correctly treating patients who experience the event.
+
