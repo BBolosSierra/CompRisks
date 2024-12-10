@@ -486,6 +486,128 @@ CIndexCRisks2(predictions=tmp_pred,
 C_vdata
 ```
 
+Translating the function from pec: https://github.com/cran/pec/blob/master/src/cindex.c
+
+Something must be missing...
+
+```{r}
+cindexSRC_R <- function(Y, 
+                        status, 
+                        times, 
+                        weight_i, 
+                        weight_j, 
+                        pred, 
+                        tindex,
+                        tiedpredIn = 1, 
+                        tiedoutcomeIn = 1, 
+                        tiedmatchIn = 1) {
+  # Parameters:
+  # Y: Vector of survival times
+  # status: Event indicator (1 = event, 0 = censored)
+  # times: Evaluation times
+  # weight_i: IPCW weights for subjects
+  # weight_j: IPCW weights for time points or subject pairs
+  # pred: Matrix of predictions (subjects x times)
+  # tindex: Time indices for survival times
+  # tiedpredIn, tiedoutcomeIn, tiedmatchIn: Tie-handling parameters
+  
+  N <- length(Y)  # Number of subjects
+  NT <- length(times)  # Number of evaluation times
+  
+  # Initialize result vectors
+  C <- numeric(NT)
+  conc <- numeric(NT)
+  pairs <- numeric(NT)
+  
+  # Loop over evaluation times
+  for (s in seq_len(NT)) {
+    conc[s] <- 0
+    pairs[s] <- 0
+    
+    # Loop over subjects
+    for (i in seq_len(N)) {
+      # Usable pairs: i's event time must be <= current time and uncensored
+      if (Y[i] <= times[s] && status[i] == 1) {
+        for (j in seq(i + 1, N)) {  # Only consider pairs (i, j) with j > i
+          # Compute IPCW weights
+          wi <- weight_i[i]
+          wj <- weight_j[tindex[i]]
+          
+          ww <- wi * wj
+          
+          # Skip pairs with zero weights
+          if (wi > 0 && wj > 0) {
+            # Tied outcomes and predictions: Fully concordant if tiedmatchIn == TRUE
+            if (tiedmatchIn == 1 && Y[i] == Y[j] && status[j] == 1 &&
+                pred[i, s] == pred[j, s]) {
+              pairs[s] <- pairs[s] + 1 / ww
+              conc[s] <- conc[s] + 1 / ww
+            } else {
+              # If tiedoutcomeIn == 0, exclude pairs with tied outcomes (unless j is censored)
+              if (tiedoutcomeIn == 1 || (Y[i] != Y[j] || status[j] == 0)) {
+                # Tied predictions: Include as half-concordant if tiedpredIn == TRUE
+                if (pred[i, s] == pred[j, s]) {
+                  if (tiedpredIn == 1) {
+                    pairs[s] <- pairs[s] + 1 / ww
+                    conc[s] <- conc[s] + 1 / (2 * ww)
+                  }
+                } else {
+                  # Concordant if pred[i, s] < pred[j, s]
+                  pairs[s] <- pairs[s] + 1 / ww
+                  if (pred[i, s] < pred[j, s]) {
+                    conc[s] <- conc[s] + 1 / ww
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    # Compute C-index for time s
+    if (pairs[s] > 0) {
+      C[s] <- conc[s] / pairs[s]
+    } else {
+      C[s] <- NA  # Avoid division by zero
+    }
+  }
+  
+  return(C)
+}
+```
+
+```{r}
+weight.i <- pec::ipcw(formula=Surv(time,censor.status)~1,
+                 data=tmp,
+                 method="marginal",
+                 times=unique(tmp$time),
+                 subjectTimes=tmp$time, 
+                 what = "IPCW.subjectTimes")$IPCW.subjectTimes
+
+tmp$ipcw_subject_times <- weight.i
+
+weight.j <- pec::ipcw(formula=Surv(time,censor.status)~1,
+                 data=tmp,
+                 method="marginal",
+                 times=tmp$time,
+                 what = "IPCW.times")$IPCW.times
+
+tmp$ipcw_times <- weight.j
+
+cindexSRC_R(Y = tmp$time, 
+            status = tmp$status, 
+            times = horizon, 
+            weight_i = weight.i, 
+            weight_j = weight.j, 
+            pred = tmp_pred, 
+            tindex = match(tmp$time, unique(tmp$time)),
+            tiedpredIn = 1, 
+            tiedoutcomeIn = 1, 
+            tiedmatchIn = 1)
+```
+
+
 ```{r}
 source("CompRisksMetrics/ConcordanceIndexMTimes.R") 
 ```
