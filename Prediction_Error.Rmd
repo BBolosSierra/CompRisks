@@ -166,6 +166,80 @@ score_boot <- function(split) {
 score_vdata$Brier$score
 ```
 
+```{r}
+set.seed(123)
+
+df_raw <- sim_cmprks(n=1000, gammas=1/10)
+
+hist(df_raw$Tobs, breaks = 100)
+```
+
+
+```{r}
+
+df <- prepare_data(df_raw, time_col = Tobs, event_col = cause)
+
+df <- df[, !(names(df) %in% c("status"))]
+
+outer <- rsample::vfold_cv(df, v =2, strata = "event")
+
+rdata <- outer$splits[[1]]$data
+vdata <- outer$splits[[2]]$data
+
+# Models -------------------
+fit_csh <- riskRegression::CSC(Hist(time, event) ~ 1,
+data = rdata
+)
+fit_csc1 <- fit_csh$models$`Cause 1`
+fit_csc2 <- fit_csh$models$`Cause 2`
+
+# Overall performance measures ----------------
+primary_event <- 1 # Set to 2 if cause 2 was of interest
+#horizon <- quantile(df$time, 0.75) # Set time horizon for prediction (here 5 years)
+horizon <- seq(0, 2, 0.1)
+# Development data
+score_vdata <- riskRegression::Score(
+  list("csh_development" = fit_csh),
+  formula = Hist(time, event) ~ 1,
+  cens.model = "km",
+  data = vdata,
+  conf.int = TRUE,
+  times = horizon,
+  metrics = c("auc", "brier"),
+  summary = c("ibs"),
+  cause = primary_event,
+  plots = "calibration"
+)
+
+# Predicted probability calculation
+pred <- predictRisk(fit_csh,
+  cause = primary_event,
+  newdata = vdata,
+  times = horizon
+)
+
+# WeightedBrierScore(predictions=pred, 
+#             time = vdata$time, 
+#             status = vdata$event,
+#             cause = primary_event,
+#             tau = horizon, 
+#             cens.code = 0, 
+#             cmprsk=TRUE)
+
+
+IntegratedBrierScore(prediction_matrix = pred,
+                      time = vdata$time, 
+                      status = vdata$event,
+                      cause = primary_event,
+                      tau = horizon, 
+                      cens.code = 0, 
+                      cmprsk=TRUE)
+```
+```{r}
+#score_vdata$Brier$score
+score_vdata$Brier$score
+```
+
 
 To calculate the CI of the scaled Brier:
 
@@ -325,6 +399,8 @@ $(1 - \hat{S}(\tau, \mathbf{x}_i))^2$ when $D_i(\tau) = 1$.
 There is two implementations of the Weighted Brier Score:
 
 ```{r}
+# Helper
+source("CompRisksMetrics/HelperFunctions.R")
 # As previously described in the formulas above
 source("CompRisksMetrics/WeightedBrierScore.R")
 
@@ -355,7 +431,7 @@ However, although considering censoring... are we considering competing risks???
 RiskRegression result:
 
 ```{r}
-score_vdata$Brier$score
+score_vdata$Brier$score$Brier[[2]]
 ```
 
 

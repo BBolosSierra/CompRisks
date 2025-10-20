@@ -55,11 +55,15 @@ WeightedBrierScore <- function(predictions,
                                 status, 
                                 cause, 
                                 cens.code, 
-                                cmprsk = FALSE) {
+                                cmprsk = FALSE){
+  
   # Extract the censoring probabilities
   G <- censor.prob.KM(time = time, 
                       status = status, 
                       cens.code = cens.code)
+  # Order by id 
+  #G <- as.numeric(as.matrix(G[order(G$id),]))
+  #G <- G[, -ncol(G)]
   
   # Create an empty vector for weights
   n <- length(predictions)
@@ -125,10 +129,125 @@ WeightedBrierScore <- function(predictions,
   }
   
   # Normalize residuals to compute the weighted Brier score
-  BS_we <- mean(residuals)
+  BS_we <- sum(residuals)/n
   
   return(list(weighted.brier.score = BS_we,
               tau = tau,
               n = n,
               n.risk = sum(Y_tilde)))
+}
+
+WeightedBrierScore <- function(predictions, 
+                               tau, 
+                               time, 
+                               status, 
+                               cause, 
+                               cens.code, 
+                               cmprsk = FALSE){
+  
+  # Allow vector of taus and corresponding prediction columns with minimal changes
+  # If predictions is a vector, coerce to a one-column matrix
+  if (is.vector(predictions)) {
+    predictions <- matrix(as.numeric(predictions), ncol = 1L)
+  } else {
+    predictions <- as.matrix(predictions)
+  }
+  tau <- as.numeric(tau)
+  # If a single column of predictions is provided with multiple taus, recycle that column
+  if (ncol(predictions) == 1L && length(tau) > 1L) {
+    predictions <- matrix(predictions[, 1L], nrow = length(predictions), ncol = length(tau))
+  }
+  if (ncol(predictions) != length(tau)) {
+    stop("Number of columns in 'predictions' must match length(tau).")
+  }
+  
+  # Extract the censoring probabilities
+  G <- censor.prob.KM(time = time, 
+                      status = status, 
+                      cens.code = cens.code)
+  # Order by id 
+  #G <- as.numeric(as.matrix(G[order(G$id),]))
+  #G <- G[, -ncol(G)]
+  
+  # Create an empty vector for weights
+  n <- nrow(predictions)
+  # W <- rep(0, n)  # not used downstream; keep comment but avoid unused var
+  
+  # Prepare outputs over possibly multiple taus
+  BS_we_all <- numeric(length(tau))
+  n_risk_all <- integer(length(tau))
+  
+  # Loop over evaluation times tau (supports vector taus)
+  for (jj in seq_along(tau)) {
+    tau_j <- tau[jj]
+    p_j   <- predictions[, jj]
+    
+    # Binary indicator for individuals still at risk at tau
+    Y_tilde <- (time > tau_j)
+    
+    # Binary indicator for individuals experiencing the event of interest by tau
+    Y_true <- (time <= tau_j & status == cause)
+    
+    # Create a residuals vector for the weighted Brier score
+    residuals <- rep(0, n)
+    
+    for (i in 1:n) {
+      # Get the index of censoring time greater or equal than the individual's observed time
+      indx1 <- which(G[, 1] >= time[i])
+      # Get the index of time points greater or equal than evaluation time
+      indx2 <- which(G[, 1] >= tau_j)
+      
+      # Calculate G1: censoring probabilities just before observed times T
+      G1 <- if (length(indx1) > 0) G[indx1[1], 2] else 1
+      
+      # Calculate G2: censoring probabilities at tau or greater
+      G2 <- if (length(indx2) > 0) G[indx2[1], 2] else 1
+      
+      if (cmprsk) {
+        # Handle weights and residuals considering competing risks
+        if (status[i] == cause && time[i] <= tau_j) {
+          # Case 1: Event of interest occurs before tau
+          # W[i] <- 1 / G1
+          # Where the true outcome is 1, therefore penalizing far from 1 predictions
+          residuals[i] <- (1 - p_j[i])^2 / G1
+        } else if (status[i] != cause && status[i] != cens.code && time[i] <= tau_j) {
+          # Case 2: Competing risks before tau
+          # W[i] <- 1 / G1
+          residuals[i] <- (p_j[i]^2) / G1
+        } else if (status[i] == cens.code && time[i] <= tau_j) {
+          # Case 3: Censored before tau
+          # W[i] <- 0
+          residuals[i] <- 0
+        } else if (time[i] > tau_j) {
+          # Case 4: Event or censoring after tau
+          # W[i] <- 1 / G2
+          residuals[i] <- (p_j[i]^2) / G2
+        }
+      } else {
+        # Handle weights and residuals ignoring competing risks
+        if (time[i] <= tau_j && status[i] == cause) {
+          # Case 1: Event occurs before tau
+          # W[i] <- 1 / G1
+          residuals[i] <- (1 - p_j[i])^2 / G1
+        } else if (time[i] <= tau_j && status[i] == cens.code) {
+          # Case 2: Censored before tau
+          # W[i] <- 0
+          residuals[i] <- 0
+        } else if (time[i] > tau_j) {
+          # Case 3: Event or censoring after tau
+          # W[i] <- 1 / G2
+          residuals[i] <- (p_j[i]^2) / G2
+        }
+      }
+    }
+    
+    # Normalize residuals to compute the weighted Brier score
+    BS_we_all[jj] <- mean(residuals)
+    n_risk_all[jj] <- sum(Y_tilde)
+  }
+  
+  return(list(weighted.brier.score = BS_we_all,
+              tau = tau,
+              n = n,
+              n.risk = n_risk_all))
 }

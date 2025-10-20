@@ -42,24 +42,16 @@ IntegratedBrierScore <- function(prediction_matrix,
   # Number of times evaluated the brier score
   nt <- dim(prediction_matrix)[2]
   # Initialize a empty vector for brier scores
-  bs <- rep(0, nt)
+  # bs <- rep(0, nt)
   # Loop through array
   # Rows: individuals, Columns: time points
-  for (j in seq(nt)) {
-    # Get the model prediction and time of evaluation tau
-    tau <- taus[j]
-    predictions <- prediction_matrix[,j] 
-    # Calculate Weighted Brier Score
-    BS_we <- WeightedBrierScore(predictions = predictions,
-                       tau = tau,
-                       time =  time,
-                       status = status,
-                       cause = cause, 
-                       cens.code = cens.code, 
-                       cmprsk = cmprsk)$weighted.brier.score
-    # Store value 
-    bs[j] <- BS_we
-  }
+  bs <-  WeightedBrierScore(predictions = prediction_matrix,
+                            tau = taus,
+                            time =  time,
+                            status = status,
+                            cause = cause, 
+                            cens.code = cens.code, 
+                            cmprsk = cmprsk)$weighted.brier.score
   # Calculate max and min time to normalize with respect to time interval
   t.max = max(taus)
   t.min = min(taus)
